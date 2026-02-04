@@ -322,6 +322,39 @@ ls cpu-int4/genai_config.json
 - `model.onnx` (FP32): 9.5 GB
 - `model.onnx` (INT4): 2.5 GB (+ 2.5 GB .data file)
 
+## Step 6: Fix Model Type in genai_config.json (Required)
+
+**IMPORTANT**: After export, you must manually update the model type in `genai_config.json`:
+
+```bash
+# Edit the config file
+# For FP32 model
+notepad cpu-fp32/genai_config.json
+
+# For INT4 model
+notepad cpu-int4/genai_config.json
+```
+
+**Change line 33** from:
+```json
+"type": "qwen2",
+```
+
+**To**:
+```json
+"type": "qwen3",
+```
+
+**Why this is needed**: The builder currently defaults to "qwen2" type, but Qwen3-VL uses Qwen3 architecture. This ensures correct model loading and inference behavior.
+
+**Verification**:
+```bash
+# Check the model type (should show "qwen3")
+python -c "import json; print('Model type:', json.load(open('cpu-fp32/genai_config.json'))['model']['type'])"
+```
+
+Expected output: `Model type: qwen3`
+
 ## Troubleshooting
 
 ### Error: "GuardOnDataDependentSymNode"
