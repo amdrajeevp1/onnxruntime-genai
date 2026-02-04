@@ -359,7 +359,7 @@ def main():
     config, processor, model = prepare_model(args)
     
     # Build components
-    build_vision(args, config, processor, model, args.vision_output)
+    #build_vision(args, config, processor, model, args.vision_output)
     build_embedding(args, config, processor, model, args.embedding_output)
     build_text(args, config, processor, model, args.text_output, args.text_precision)
     

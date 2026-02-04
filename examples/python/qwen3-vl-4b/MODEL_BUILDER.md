@@ -103,6 +103,108 @@ def forward(self, seqlen: int) -> torch.Tensor:
 
 **Why?** ONNX export fails with dynamic tensor operations that depend on runtime values. Precomputing the frequency table avoids `GuardOnDataDependentSymNode` errors.
 
+## Step 2.5: Builder Framework Modifications (Required)
+
+To enable proper Qwen3-VL support with MRoPE (Multimodal Rotary Position Embedding), modifications were made to the `onnxruntime-genai` builder framework:
+
+### Changes to `src/python/py/models/builder.py`
+
+Added Qwen3-VL architecture detection and routing to use the specialized `Qwen3VLTextModel` class:
+
+```python
+# Around line 350-365
+elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
+    text_config = config.text_config
+    for key in text_config:
+        if not hasattr(config, key):
+            setattr(config, key, getattr(text_config, key))
+    print(
+        "WARNING: This is only generating the text component of the model. "
+        "Setting `--extra_options exclude_embeds=true` by default."
+    )
+    extra_options["exclude_embeds"] = True
+    onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+```
+
+**Why?** Without this, the builder treats Qwen3-VL as a generic model without proper MRoPE configuration, resulting in incorrect ONNX exports.
+
+### Changes to `src/python/py/models/builders/qwen.py`
+
+Added a new `Qwen3VLTextModel` class that inherits from `Qwen25VLTextModel` (since they share similar architecture but different MRoPE sections):
+
+```python
+class Qwen3VLTextModel(Qwen25VLTextModel):
+    """
+    Qwen3-VL text model inherits from Qwen2.5-VL since they share the same architecture.
+    The main difference is MRoPE sections: Qwen3-VL uses [24, 20, 20] vs Qwen2.5-VL's [16, 24, 24].
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # Initialize parent Qwen25VLTextModel
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        
+        # Print model info
+        print(f"Qwen3-VL MRoPE sections: {self.mrope_sections}")
+        print(f"Qwen3-VL rope_theta: {config.rope_theta}")
+
+    def load_weights(self, input_path):
+        # Load the Hugging Face model - Qwen3-VL specific
+        print("Loading Qwen3VLForConditionalGeneration model...")
+        from transformers import Qwen3VLForConditionalGeneration
+        
+        return Qwen3VLForConditionalGeneration.from_pretrained(
+            self.model_name_or_path,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
+            trust_remote_code=self.hf_remote,
+        )
+```
+
+**Key Features**:
+- MRoPE sections: `[24, 20, 20]` (temporal, height, width dimensions)
+- `rope_theta`: 5000000 (frequency base for rotary embeddings)
+- Proper loading of `Qwen3VLForConditionalGeneration` from Hugging Face
+
+### Changes to `src/python/py/models/builders/__init__.py`
+
+Exported the new class so it can be imported by `builder.py`:
+
+```python
+from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, QwenModel
+
+__all__ = [
+    # ... other exports ...
+    "Qwen3VLTextModel",  # Added
+    # ...
+]
+```
+
+### Installing Modified Builder
+
+**If you modified the source code**, you need to update the installed package:
+
+```bash
+# Option A: Copy modified files to installed package (faster for testing)
+cp src/python/py/models/builder.py $CONDA_PREFIX/Lib/site-packages/onnxruntime_genai/models/
+cp src/python/py/models/builders/qwen.py $CONDA_PREFIX/Lib/site-packages/onnxruntime_genai/models/builders/
+cp src/python/py/models/builders/__init__.py $CONDA_PREFIX/Lib/site-packages/onnxruntime_genai/models/builders/
+
+# Clear Python cache
+find $CONDA_PREFIX/Lib/site-packages/onnxruntime_genai -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# Option B: Reinstall package from source
+cd path/to/onnxruntime-genai-source
+pip install -e .
+```
+
+**Verification**:
+
+```python
+python -c "from onnxruntime_genai.models.builders import Qwen3VLTextModel; print('Qwen3VLTextModel available:', Qwen3VLTextModel)"
+```
+
+**Note**: These modifications are required for the builder to correctly export Qwen3-VL models with proper MRoPE support. Without them, the exported ONNX model will not work correctly.
+
 ## Step 3: Test PyTorch Pipeline (Recommended)
 
 Before exporting to ONNX, verify the modified model works correctly:

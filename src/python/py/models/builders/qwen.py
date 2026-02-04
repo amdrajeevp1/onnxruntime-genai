@@ -677,3 +677,30 @@ class Qwen25VLTextModel(Model):
             token=self.hf_token,
             trust_remote_code=self.hf_remote,
         )
+
+
+class Qwen3VLTextModel(Qwen25VLTextModel):
+    """
+    Qwen3-VL text model inherits from Qwen2.5-VL since they share the same architecture.
+    The main difference is MRoPE sections: Qwen3-VL uses [24, 20, 20] vs Qwen2.5-VL's [16, 24, 24].
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        # Initialize parent Qwen25VLTextModel
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        
+        # Print model info
+        print(f"Qwen3-VL MRoPE sections: {self.mrope_sections}")
+        print(f"Qwen3-VL rope_theta: {config.rope_theta}")
+
+    def load_weights(self, input_path):
+        # Load the Hugging Face model - Qwen3-VL specific
+        print("Loading Qwen3VLForConditionalGeneration model...")
+        from transformers import Qwen3VLForConditionalGeneration
+        
+        return Qwen3VLForConditionalGeneration.from_pretrained(
+            self.model_name_or_path,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
+            trust_remote_code=self.hf_remote,
+        )

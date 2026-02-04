@@ -139,6 +139,7 @@ class Qwen3VLTextOnlyPipeline:
         top_k: int = 20,
         top_p: float = 0.8,
         do_sample: bool = True,
+        use_chat_template: bool = True,
     ) -> str:
         """Generate text from prompt"""
         
@@ -146,8 +147,21 @@ class Qwen3VLTextOnlyPipeline:
         print(f"Prompt: {prompt}")
         print("=" * 70)
         
+        # Apply chat template if requested (default for Qwen3-VL)
+        if use_chat_template:
+            messages = [{"role": "user", "content": prompt}]
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            print(f"  Using chat template: Yes")
+        else:
+            formatted_prompt = prompt
+            print(f"  Using chat template: No")
+        
         # Tokenize
-        input_ids = self.tokenizer.encode(prompt, add_special_tokens=True)
+        input_ids = self.tokenizer.encode(formatted_prompt, add_special_tokens=False)
         input_ids = np.array(input_ids, dtype=np.int64)
         
         print(f"  Input tokens: {len(input_ids)}")
@@ -326,6 +340,11 @@ def main():
         action="store_true",
         help="Interactive mode (keep prompting)"
     )
+    parser.add_argument(
+        "--no_chat_template",
+        action="store_true",
+        help="Disable chat template (not recommended for Qwen3-VL)"
+    )
     
     args = parser.parse_args()
     
@@ -358,6 +377,7 @@ def main():
                     top_k=args.top_k,
                     top_p=args.top_p,
                     do_sample=not args.no_sample,
+                    use_chat_template=not args.no_chat_template,
                 )
                 
             except KeyboardInterrupt:
@@ -379,6 +399,7 @@ def main():
             top_k=args.top_k,
             top_p=args.top_p,
             do_sample=not args.no_sample,
+            use_chat_template=not args.no_chat_template,
         )
         
         print("\n[OK] Generation complete!")
