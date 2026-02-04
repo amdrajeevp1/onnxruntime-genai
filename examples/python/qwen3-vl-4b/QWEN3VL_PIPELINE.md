@@ -4,9 +4,16 @@ This guide explains how to use the exported Qwen3-VL ONNX models for inference.
 
 ## Overview
 
-The Qwen3-VL ONNX pipeline consists of:
-- **Text-Only Inference**: Working and tested (FP32/INT4)
-- **Vision + Text Inference**: TBD (models exported, pipeline integration pending)
+The Qwen3-VL ONNX pipeline provides two inference scripts:
+
+1. **`qwen3-vl-text.py`** - Text-only inference (simpler, faster for pure text tasks)
+2. **`qwen3-vl.py`** - Full multimodal pipeline (text-only AND vision+text)
+
+Both scripts support:
+- ✅ FP32 and INT4 text models
+- ✅ Streaming token generation
+- ✅ Customizable sampling parameters
+- ✅ Qwen3 architecture with standard RoPE
 
 ## Prerequisites
 
@@ -20,20 +27,29 @@ pip install onnxruntime transformers numpy
 ```
 qwen3-vl-4b/
 ├── cpu-fp32/                    # Vision, embedding, and optionally text models
-│   ├── qwen3vl-vision.onnx
-│   ├── qwen3vl-embedding.onnx
-│   ├── model.onnx              # If using FP32 text
+│   ├── qwen3vl-vision.onnx     # Vision encoder (1.9 GB)
+│   ├── qwen3vl-embedding.onnx  # Token embeddings (600 MB)
+│   ├── model.onnx              # FP32 text decoder (9.5 GB)
 │   └── genai_config.json
 ├── cpu-int4/                    # Optional: INT4 text model
-│   ├── model.onnx
+│   ├── model.onnx              # INT4 text decoder (2.5 GB)
+│   ├── model.onnx.data         # INT4 weights
 │   └── genai_config.json
-├── pytorch/                     # Tokenizer files
+├── pytorch/                     # Tokenizer and processor files
 │   ├── tokenizer.json
+│   ├── preprocessor_config.json
 │   └── ...
-└── qwen3-vl-text.py            # Inference script
+├── images/                      # Test images
+│   ├── test_colors.jpg
+│   ├── test_checkerboard.jpg
+│   └── test_gradient_genai.jpg
+├── qwen3-vl-text.py            # Text-only inference script
+└── qwen3-vl.py                 # Multimodal inference script
 ```
 
-## Text-Only Inference
+## Script 1: Text-Only Inference (`qwen3-vl-text.py`)
+
+Use this script for pure text generation (no vision). It's simpler and faster for text-only tasks.
 
 ### Quick Start
 
@@ -314,21 +330,28 @@ The text model uses key-value caching for efficient generation:
 
 ### Model Inputs/Outputs
 
-**Embedding Model**:
+**Vision Model** (`qwen3vl-vision.onnx`):
+- Inputs:
+  - `pixel_values` [num_patches, 1536] (float32)
+  - `image_grid_thw` [num_images, 3] (int64) - temporal/height/width grid
+- Output:
+  - `pooled_embeds` [num_merged_patches, hidden_size] (float32)
+
+**Embedding Model** (`qwen3vl-embedding.onnx`):
 - Input: `input_ids` [batch, seq_len] (int64)
 - Output: `inputs_embeds` [batch, seq_len, hidden_size] (fp32)
 
-**Text Model**:
+**Text Model** (`model.onnx`):
 - Inputs:
   - `inputs_embeds` [batch, seq_len, hidden_size] (fp32)
-  - `position_ids` [3, batch, seq_len] (int64)
   - `attention_mask` [batch, total_seq_len] (int64)
   - `past_key_values.{i}.key` [batch, num_kv_heads, past_len, head_dim] (fp32)
   - `past_key_values.{i}.value` [batch, num_kv_heads, past_len, head_dim] (fp32)
+  - **Note**: No `position_ids` input - Qwen3 computes positions internally with standard RoPE
 - Outputs:
   - `logits` [batch, seq_len, vocab_size] (fp32)
-  - `present_key_values.{i}.key` [batch, num_kv_heads, total_len, head_dim] (fp32)
-  - `present_key_values.{i}.value` [batch, num_kv_heads, total_len, head_dim] (fp32)
+  - `present.{i}.key` [batch, num_kv_heads, total_len, head_dim] (fp32)
+  - `present.{i}.value` [batch, num_kv_heads, total_len, head_dim] (fp32)
 
 ## Advanced Usage
 
@@ -386,20 +409,70 @@ time python qwen3-vl-text.py --prompt "Test" --max_new_tokens 50
 3. **Integrate**: Build applications with the ONNX pipeline
 4. **Contribute**: Help improve the vision + text pipeline
 
+## Testing Both Scripts
+
+### Test 1: Text-Only Generation
+
+```bash
+# Using qwen3-vl-text.py (simpler, text-only)
+python qwen3-vl-text.py \
+  --text_precision fp32 \
+  --prompt "Explain quantum entanglement in simple terms." \
+  --max_new_tokens 100
+
+# Using qwen3-vl.py (multimodal, but works for text too)
+python qwen3-vl.py \
+  --text_precision fp32 \
+  --text "Explain quantum entanglement in simple terms." \
+  --max_new_tokens 100
+```
+
+Both should produce similar outputs.
+
+### Test 2: Multimodal Generation
+
+```bash
+# Using qwen3-vl.py with test images
+python qwen3-vl.py \
+  --image images/test_colors.jpg \
+  --text "What colors are in this image?" \
+  --max_new_tokens 50 \
+  --text_precision fp32
+
+python qwen3-vl.py \
+  --image images/test_checkerboard.jpg \
+  --text "Describe the pattern." \
+  --max_new_tokens 80 \
+  --text_precision fp32
+
+python qwen3-vl.py \
+  --image images/test_gradient_genai.jpg \
+  --text "What do you see?" \
+  --max_new_tokens 100 \
+  --text_precision fp32
+```
+
+### Expected Results
+
+**Text-only**: Coherent, factual responses about the topic
+**Vision+text**: Accurate descriptions of image content (colors, patterns, structures)
+
 ## Reference Files
 
-- `qwen3-vl-text.py` - Text-only inference script (389 lines)
-- `MODEL_BUILDER.md` - Export guide
+- `qwen3-vl-text.py` - Text-only inference script (408 lines)
+- `qwen3-vl.py` - Full multimodal inference script (563 lines)
+- `MODEL_BUILDER.md` - Step-by-step export guide
 - `builder_simple.py` - Model export script
 - `test_pytorch_pipeline.py` - PyTorch reference implementation
+- `images/` - Test images for vision pipeline
 
 ## Known Limitations
 
-1. **INT4 quality**: Quantized model produces poor outputs, needs debugging
-2. **Vision pipeline**: Not yet integrated with ONNX text model
-3. **Context length**: Limited testing beyond 2048 tokens
-4. **Performance**: CPU-only, no GPU optimization yet
-5. **Batch size**: Fixed to 1, no dynamic batching
+1. **INT4 quality**: FP32 recommended for production (INT4 under investigation)
+2. **Context length**: Limited testing beyond 2048 tokens
+3. **Performance**: CPU-only, no GPU optimization yet
+4. **Batch size**: Fixed to 1, no dynamic batching
+5. **Video support**: Not yet implemented (images only)
 
 ## Support
 
