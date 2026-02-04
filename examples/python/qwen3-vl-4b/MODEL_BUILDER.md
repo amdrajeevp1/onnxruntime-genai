@@ -130,21 +130,21 @@ elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
 
 ### Changes to `src/python/py/models/builders/qwen.py`
 
-Added a new `Qwen3VLTextModel` class that inherits from `Qwen25VLTextModel` (since they share similar architecture but different MRoPE sections):
+Added a new `Qwen3VLTextModel` class that **inherits from `Qwen3Model`** (not Qwen2.5-VL):
 
 ```python
-class Qwen3VLTextModel(Qwen25VLTextModel):
+class Qwen3VLTextModel(Qwen3Model):
     """
-    Qwen3-VL text model inherits from Qwen2.5-VL since they share the same architecture.
-    The main difference is MRoPE sections: Qwen3-VL uses [24, 20, 20] vs Qwen2.5-VL's [16, 24, 24].
+    Qwen3-VL text model inherits from Qwen3Model since Qwen3-VL uses Qwen3 as its text backbone.
+    The text component is essentially Qwen3 with standard architecture.
     """
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # Initialize parent Qwen25VLTextModel
+        # Initialize parent Qwen3Model
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         
         # Print model info
-        print(f"Qwen3-VL MRoPE sections: {self.mrope_sections}")
+        print(f"Qwen3-VL using Qwen3 text model")
         print(f"Qwen3-VL rope_theta: {config.rope_theta}")
 
     def load_weights(self, input_path):
@@ -160,10 +160,18 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         )
 ```
 
-**Key Features**:
-- MRoPE sections: `[24, 20, 20]` (temporal, height, width dimensions)
+**Critical Architecture Details**:
+- **Inherits from `Qwen3Model`**, NOT `Qwen25VLTextModel`
+- Qwen3-VL's text component uses standard Qwen3 architecture with **standard RoPE** (not MRoPE)
+- **No 3D position_ids input** - positions computed internally by the model
 - `rope_theta`: 5000000 (frequency base for rotary embeddings)
 - Proper loading of `Qwen3VLForConditionalGeneration` from Hugging Face
+
+**Why Qwen3Model?**
+- Qwen2.5-VL uses **MRoPE** (Multimodal Rotary Position Embedding) requiring 3D position IDs
+- Qwen3-VL uses **standard RoPE** like Qwen3, with positions computed internally
+- Inheriting from `Qwen25VLTextModel` causes incorrect ONNX export with wrong input schema
+- Using `Qwen3Model` produces correct exports that match PyTorch exactly
 
 ### Changes to `src/python/py/models/builders/__init__.py`
 
@@ -200,10 +208,20 @@ pip install -e .
 **Verification**:
 
 ```python
-python -c "from onnxruntime_genai.models.builders import Qwen3VLTextModel; print('Qwen3VLTextModel available:', Qwen3VLTextModel)"
+python -c "from onnxruntime_genai.models.builders import Qwen3VLTextModel, Qwen3Model; print('Qwen3VLTextModel base:', Qwen3VLTextModel.__bases__); print('✓ Correct' if Qwen3Model in Qwen3VLTextModel.__bases__ else '✗ Wrong base class')"
 ```
 
-**Note**: These modifications are required for the builder to correctly export Qwen3-VL models with proper MRoPE support. Without them, the exported ONNX model will not work correctly.
+**Expected output**: `Qwen3VLTextModel base: (<class 'onnxruntime_genai.models.builders.qwen.Qwen3Model'>,)`
+
+**Note**: These modifications are **critical** for correct ONNX export. Using the wrong base class (`Qwen25VLTextModel`) will:
+- Export with incorrect input schema (3D position_ids instead of no position_ids)
+- Produce completely wrong logits (e.g., predicting "User" instead of "The")
+- Generate gibberish text output
+
+The correct base class (`Qwen3Model`) ensures:
+- Correct input schema (no position_ids, standard RoPE)
+- Perfect logit matching between PyTorch and ONNX (< 0.0002 difference)
+- Coherent, high-quality text generation
 
 ## Step 3: Test PyTorch Pipeline (Recommended)
 

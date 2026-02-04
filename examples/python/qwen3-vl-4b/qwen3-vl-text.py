@@ -178,14 +178,14 @@ class Qwen3VLTextOnlyPipeline:
         prompt_len = text_embeds.shape[1]
         
         # Create inputs
-        position_ids = self.create_position_ids_3d(prompt_len, 0)
+        # NOTE: Qwen3 (unlike Qwen2.5-VL) does NOT use position_ids input
+        # It computes positions internally using standard RoPE
         attention_mask = np.ones((batch_size, prompt_len), dtype=np.int64)
         
         # Empty KV caches
         kv_cache_shape = (batch_size, self.num_kv_heads, 0, self.head_dim)
         inputs_dict = {
             "inputs_embeds": text_embeds.astype(np.float32),
-            "position_ids": position_ids,
             "attention_mask": attention_mask,
         }
         
@@ -235,13 +235,11 @@ class Qwen3VLTextOnlyPipeline:
                 {"input_ids": np.array([[next_token_id]], dtype=np.int64)}
             )[0]  # [1, 1, hidden_size]
             
-            # Create inputs for incremental decoding
-            position_ids = self.create_position_ids_3d(1, current_seq_len)
+            # Create inputs for incremental decoding (no position_ids for Qwen3)
             attention_mask = np.ones((batch_size, current_seq_len + 1), dtype=np.int64)
             
             inputs_dict = {
                 "inputs_embeds": next_token_embed.astype(np.float32),
-                "position_ids": position_ids,
                 "attention_mask": attention_mask,
             }
             

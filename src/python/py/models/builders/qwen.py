@@ -679,18 +679,18 @@ class Qwen25VLTextModel(Model):
         )
 
 
-class Qwen3VLTextModel(Qwen25VLTextModel):
+class Qwen3VLTextModel(Qwen3Model):
     """
-    Qwen3-VL text model inherits from Qwen2.5-VL since they share the same architecture.
-    The main difference is MRoPE sections: Qwen3-VL uses [24, 20, 20] vs Qwen2.5-VL's [16, 24, 24].
+    Qwen3-VL text model inherits from Qwen3Model since Qwen3-VL uses Qwen3 as its text backbone.
+    The text component is essentially Qwen3 with standard architecture.
     """
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # Initialize parent Qwen25VLTextModel
+        # Initialize parent Qwen3Model
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         
         # Print model info
-        print(f"Qwen3-VL MRoPE sections: {self.mrope_sections}")
+        print(f"Qwen3-VL using Qwen3 text model")
         print(f"Qwen3-VL rope_theta: {config.rope_theta}")
 
     def load_weights(self, input_path):
