@@ -1,0 +1,125 @@
+================================================================================
+                    QWEN3-VL ONNX EXPORT - COMPLETE
+================================================================================
+
+DATE: 2026-02-03
+MISSION: Export vision encoder, embeddings, and text decoder to ONNX
+
+STATUS: SUCCESS
+
+================================================================================
+                            EXPORTED MODELS
+================================================================================
+
+[1] VISION ENCODER
+    File: cpu/vision_encoder.onnx
+    Size: 1.19 GB
+    Inputs: pixel_values [num_patches, 1536]
+            image_grid_thw [num_images, 3]
+    Outputs: pooled_embeds [num_merged_patches, 2560]
+    Status: VERIFIED
+
+[2] EMBEDDINGS
+    File: cpu/embeddings.onnx
+    Size: 1.48 GB
+    Inputs: input_ids [batch, seq_len]
+    Outputs: inputs_embeds [batch, seq_len, 2560]
+    Status: VERIFIED
+
+[3] TEXT DECODER
+    File: cpu-text/model.onnx
+    Size: 0.9 MB + external data
+    Inputs: inputs_embeds [batch, seq_len, 2560]
+            position_ids [3, batch, seq_len] (3D MRoPE!)
+            attention_mask + KV caches
+    Outputs: logits [batch, seq_len, 151936]
+             Updated KV caches
+    Status: VERIFIED
+
+================================================================================
+                           KEY MODIFICATIONS
+================================================================================
+
+[1] Rotary Embedding Fix
+    - Removed @dynamic_rope_update decorator
+    - Forced 3D position_ids [3, batch, seq]
+    - Files: pytorch/modular_qwen3_vl.py, modeling_qwen3_vl.py
+
+[2] Vision Attention Fix
+    - Forced attn_implementation="eager"
+    - SDPA doesn't export to ONNX with GQA
+    - File: builder_qwen3vl.py
+
+[3] Shape Consistency Fix
+    - num_patches = T × H × W from grid_thw
+    - Fixed: 432 → 576 for grid [1, 24, 24]
+    - File: builder_qwen3vl.py
+
+[4] Model Path Fix
+    - Changed: model.model.embed_tokens
+    - To: model.language_model.embed_tokens
+    - File: builder_qwen3vl.py
+
+================================================================================
+                             DIRECTORY STRUCTURE
+================================================================================
+
+qwen3-vl-4b/
+├── cpu/
+│   ├── vision_encoder.onnx (1.19 GB) ✓
+│   ├── embeddings.onnx (1.48 GB) ✓
+│   └── vision_processor.json ✓
+├── cpu-text/
+│   ├── model.onnx (0.9 MB) ✓
+│   ├── model.onnx.data ✓
+│   ├── genai_config.json ✓
+│   └── tokenizer files (8 files) ✓
+├── pytorch/ (modified source files) ✓
+├── pytorch_modified/ (backups) ✓
+└── Scripts and documentation (12+ files) ✓
+
+================================================================================
+                           VERIFICATION RESULTS
+================================================================================
+
+Vision Encoder:
+  Inputs: pixel_values, image_grid_thw
+  Outputs: pooled_embeds + 2 deepstack features
+  Status: OK
+
+Embeddings:
+  Inputs: input_ids  
+  Outputs: inputs_embeds
+  Status: OK
+
+Text Decoder:
+  Inputs: inputs_embeds, position_ids (3D!), attention_mask, KV caches
+  Outputs: logits, updated KV caches
+  Status: OK
+
+ALL MODELS VERIFIED: YES
+
+================================================================================
+                              NEXT STEPS
+================================================================================
+
+Ready for Phase 2: Integration Pipeline
+
+Tasks:
+1. Create image preprocessor (convert PIL image → pixel_values)
+2. Build multimodal pipeline (combine all 3 models)
+3. Test end-to-end inference (image + text → generated text)
+4. Optimize models (INT4 quantization, CUDA/DirectML)
+
+Reference: examples/python/phi-4-multi-modal.md (baseline)
+
+================================================================================
+                            AWAITING COMMAND
+================================================================================
+
+All three models successfully exported.
+Ready to proceed with pipeline integration.
+
+Next command: [Waiting...]
+
+================================================================================

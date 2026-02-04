@@ -23,7 +23,7 @@ from .phi import (
     Phi4MMModel,
     PhiModel,
 )
-from .qwen import Qwen3Model, Qwen25VLTextModel, QwenModel
+from .qwen import Qwen3Model, Qwen25VLTextModel, Qwen3VLTextModel, QwenModel
 from .smollm import SmolLM3Model
 
 __all__ = [
@@ -49,6 +49,7 @@ __all__ = [
     "PhiModel",
     "Qwen3Model",
     "Qwen25VLTextModel",
+    "Qwen3VLTextModel",
     "QwenModel",
     "SmolLM3Model",
 ]

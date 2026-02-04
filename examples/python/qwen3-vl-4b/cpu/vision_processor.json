@@ -1,0 +1,23 @@
+{
+  "processor_type": "Qwen3VLImageProcessor",
+  "min_pixels": 200704,
+  "max_pixels": 1003520,
+  "patch_size": 16,
+  "temporal_patch_size": 2,
+  "merge_size": 2,
+  "spatial_factor": 32,
+  "temporal_factor": 2,
+  "image_mean": [
+    0.5,
+    0.5,
+    0.5
+  ],
+  "image_std": [
+    0.5,
+    0.5,
+    0.5
+  ],
+  "do_resize": true,
+  "do_normalize": true,
+  "do_convert_rgb": true
+}
