@@ -21,6 +21,7 @@
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
 #include "qwen2_5_vl_image_processor.h"
+#include "qwen3vl_image_processor.h"
 #include "../dml/interface.h"
 #include "../openvino/interface.h"
 #include "../ryzenai/interface.h"
@@ -1356,7 +1357,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
-          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>}} {
+          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
+          {"qwen3_vl", Processor::Create<Qwen3VLImageProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);
