@@ -52,56 +52,28 @@ processor.save_pretrained('pytorch')
 "
 ```
 
-**Expected structure**:
+**Expected structure** (after download, `pytorch/` has weights, config, tokenizer, processor; modeling source is **not** required here):
 ```
 pytorch/
 ├── config.json
-├── modeling_qwen3_vl.py
-├── modular_qwen3_vl.py
-├── processing_qwen3_vl.py
 ├── model-*.safetensors
-└── ... (other files)
+├── tokenizer.json
+├── preprocessor_config.json
+└── ... (other files from save_pretrained)
 ```
 
-## Step 2: Apply ONNX-Compatible Modifications
+## Step 2: ONNX-Compatible Modeling Source (Handled by Builder)
 
-Copy the modified `modeling_qwen3_vl.py` from `pytorch_modified/` to your `pytorch/` directory:
+You **do not** copy any modified modeling file into `pytorch/`. The builder script **injects** the ONNX-compatible modeling code for you.
 
-```bash
-# Backup original file (optional but recommended)
-cp pytorch/modeling_qwen3_vl.py pytorch/modeling_qwen3_vl.py.original
+- **Source of truth**: `pytorch_backup/modeling_qwen3_vl.py` in this repo (same directory as `builder_simple.py`).
+- **What the builder does**: Before loading the Hugging Face model, it copies `pytorch_backup/modeling_qwen3_vl.py` into the installed `onnxruntime_genai` (or transformers) site-packages so that `Qwen3VLForConditionalGeneration` and the vision encoder load the ONNX-exportable implementation.
+- **Your `pytorch/` directory**: Only needs to contain the model weights, config, tokenizer, and processor (as from Hugging Face). No need to place or replace `modeling_qwen3_vl.py` there.
 
-# Copy modified version
-cp pytorch_modified/modeling_qwen3_vl.py pytorch/modeling_qwen3_vl.py
-```
+### What the ONNX-Compatible Version Does
 
-### What Was Modified?
-
-The key modification is in `Qwen3VLVisionRotaryEmbedding` class:
-
-**Original** (dynamic shapes):
-```python
-def forward(self, seqlen: int) -> torch.Tensor:
-    seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-    freqs = torch.outer(seq, self.inv_freq)  # Dynamic operation
-    return freqs
-```
-
-**Modified** (static shapes):
-```python
-def __init__(self, dim: int, theta: float = 10000.0, max_seqlen: int = 1024):
-    super().__init__()
-    # Precompute frequency table for ONNX export
-    seq = torch.arange(max_seqlen, dtype=torch.float)
-    freqs = torch.outer(seq, inv_freq)
-    self.register_buffer("freq_table", freqs, persistent=False)
-
-def forward(self, seqlen: int) -> torch.Tensor:
-    # Use precomputed table (static shape)
-    return self.freq_table[:seqlen]
-```
-
-**Why?** ONNX export fails with dynamic tensor operations that depend on runtime values. Precomputing the frequency table avoids `GuardOnDataDependentSymNode` errors.
+- **Vision**: Uses precomputed RoPE tables and, for export, skips the deepstack merger branches (`_skip_deepstack_export`) so the vision ONNX has a **single output** (pooled embeddings). The export wrapper returns `outputs[0]` when the vision model returns `(tensor, list)`.
+- **Text / RoPE**: Uses 3D position IDs and assertions suitable for ONNX; avoids dynamic `torch.arange` that triggers `GuardOnDataDependentSymNode` during export.
 
 ## Step 2.5: Builder Framework Modifications (Required)
 
@@ -300,6 +272,8 @@ Arguments:
   -t, --text_precision {fp32,int4}  Precision for text model (default: int4)
   -e, --execution_provider {cpu,cuda,dml}  Target device (default: cpu)
   -c, --cache_dir PATH      Cache directory (default: ./cache_dir)
+  --vision                  Export vision model only (default: export vision + embedding + text)
+  --vision_grid N           Grid size for vision export, e.g. 24 → 24×24=576 patches (default: 24); use 20 if processor outputs 20×20=400
 ```
 
 ## Step 5: Verify Exported Models
@@ -358,8 +332,8 @@ Expected output: `Model type: qwen3`
 ## Troubleshooting
 
 ### Error: "GuardOnDataDependentSymNode"
-- **Cause**: Using original `modeling_qwen3_vl.py` instead of modified version
-- **Fix**: Ensure modified file is copied to `pytorch/` directory (Step 2)
+- **Cause**: Loaded modeling code is the original (dynamic) version, not the ONNX-compatible one.
+- **Fix**: Ensure you run `builder_simple.py` from the repo directory that contains `pytorch_backup/modeling_qwen3_vl.py`; the builder injects that file into site-packages before loading the model. Do not rely on a `modeling_qwen3_vl.py` from a vanilla Hugging Face download for export.
 
 ### Error: "AttributeError: 'Qwen3VLConfig' object has no attribute 'rope_theta'"
 - **Cause**: Missing `rope_theta` in config.json
@@ -381,9 +355,10 @@ Expected output: `Model type: qwen3`
 ## Next Steps
 
 After successful export:
-1. Test text-only inference: See `QWEN3VL_PIPELINE.md`
-2. Test with your own prompts
-3. Experiment with generation parameters (temperature, top_k, top_p)
+1. **Text-only inference**: See `QWEN3VL_PIPELINE.md` (Script 1: `qwen3-vl-text.py`)
+2. **Vision + text inference**: Same doc, Script 2: `qwen3-vl.py` with `--image` and `--text`
+3. Test with your own prompts and images in `images/`
+4. Experiment with generation parameters (temperature, top_k, top_p)
 
 ## Technical Details
 
@@ -401,11 +376,11 @@ After successful export:
 - Output: Embeddings [batch, seq_len, hidden_size]
 
 **Text Model**:
-- Uses `onnxruntime_genai.models.builder`
+- Uses `onnxruntime_genai.models.builder` (Qwen3 text backbone, not Qwen2.5-VL)
 - Excludes embeddings (exported separately)
 - Supports FP32 or INT4-RTN quantization
 - Includes KV cache for efficient generation
-- 3D position IDs for MRoPE (Multimodal Rotary Position Embedding)
+- Standard RoPE (positions handled internally; no MRoPE)
 
 ### Model Architecture
 
@@ -421,7 +396,7 @@ Qwen3-VL-4B-Instruct:
 
 ## Reference Files
 
-- `builder_simple.py` - Main export script (385 lines)
-- `pytorch_modified/modeling_qwen3_vl.py` - Modified model with ONNX fixes
-- `test_pytorch_pipeline.py` - PyTorch validation script
-- `QWEN3VL_PIPELINE.md` - Inference usage guide
+- `builder_simple.py` - Main export script; injects `pytorch_backup/modeling_qwen3_vl.py` before load
+- `pytorch_backup/modeling_qwen3_vl.py` - ONNX-compatible modeling (vision single-output, RoPE/position fixes)
+- `test_pytorch_pipeline.py` - PyTorch validation script (optional)
+- `QWEN3VL_PIPELINE.md` - Inference usage guide (text-only and vision+text)
