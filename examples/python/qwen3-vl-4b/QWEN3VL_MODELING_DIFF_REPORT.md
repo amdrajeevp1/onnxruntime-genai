@@ -12,13 +12,19 @@
 
 ## Only code difference: DeepStack branch
 
-- **Condition (ours):** run DeepStack merger at layer \(\ell\) **iff**
-  \[
-  \ell \in \text{deepstack\_visual\_indexes}
-  \quad\text{and}\quad
-  \neg\,\bigl(\texttt{\_skip\_deepstack\_export} \lor \texttt{torch.jit.is\_tracing()}\bigr).
-  \]
-- **Golden:** same, but without the second clause (always runs when \(\ell \in \text{deepstack\_visual\_indexes}\)).
+**Code snippet changes (Qwen3VLVisionModel.forward, ~lines 745–753):**
+
+| | **Golden** | **Modified** |
+|---|-------------|--------------|
+| **Condition** | `if layer_num in self.deepstack_visual_indexes:` | `if layer_num in self.deepstack_visual_indexes and not (getattr(self, "_skip_deepstack_export", False) or torch.jit.is_tracing()):` |
+| **Body** | `deepstack_feature = self.deepstack_merger_list[...](hidden_states)`<br>`deepstack_feature_lists.append(deepstack_feature)` | Same as Golden |
+
+- **Condition (Modified):** Run DeepStack merger at layer ℓ **iff** ℓ ∈ deepstack_visual_indexes **and** ¬( _skip_deepstack_export ∨ torch.jit.is_tracing() ).
+- **Golden:** same, but without the second clause (always runs when ℓ ∈ deepstack_visual_indexes).
+
+**Copy-paste for PowerPoint (plain text):**
+Run DeepStack merger at layer ℓ iff ℓ ∈ deepstack_visual_indexes and ¬(_skip_deepstack_export ∨ torch.jit.is_tracing()).
+
 - **Export:** builder sets `_skip_deepstack_export = True` → DeepStack not traced → ONNX has single output path → one output tensor.
 
 ---
@@ -26,17 +32,17 @@
 ## Shared math / behavior (unchanged)
 
 **Vision RoPE (both):**
-- \(\theta = 10^4\), \(\text{inv\_freq}_i = \theta^{-2i/d}\), \(\text{freqs} = \text{seq}_{1:L} \otimes \text{inv\_freq}\) (outer), then \(\cos/\sin\) applied to \((q,k)\).
-- No precomputed table; dynamic \(\text{seqlen}\).
+- θ = 10⁴; inv_freq_i = θ^(-2i/d); freqs = seq ⊗ inv_freq (outer product); then cos/sin applied to (q, k).
+- No precomputed table; dynamic seqlen.
 
 **Vision data flow (both):**
-- \(\text{pixel\_values} \to \text{patch\_embed} \to \text{pos\_embed} + \text{rotary} \to \text{blocks} \to \text{merger} \to \text{pooled\_embeds}\); DeepStack branches (when run) tap intermediate layers and merge.
+- pixel_values → patch_embed → pos_embed + rotary → blocks → merger → pooled_embeds; DeepStack branches (when run) tap intermediate layers and merge.
 
 **Text / MRoPE (both):**
-- \(\text{position\_ids}\) shape \((3, B, S)\) (T/H/W or batch/seq); interleaved MRoPE; \(\cos,\sin\) from \(\text{inv\_freq}\) and \(\text{position\_ids}\).
+- position_ids shape (3, B, S) for T/H/W or batch/seq; interleaved MRoPE; cos, sin from inv_freq and position_ids.
 
 **Output contract (both):**
-- Vision forward returns \((\text{hidden\_states}, \text{deepstack\_feature\_lists})\); ONNX export wrapper uses \(\text{outputs}[0]\) only.
+- Vision forward returns (hidden_states, deepstack_feature_lists); ONNX export wrapper uses outputs[0] only.
 
 ---
 
@@ -44,15 +50,13 @@
 
 The vision encoder does **not** take raw pixels; it takes **patch features** and a **grid**. Image size is fixed by preprocessing.
 
-| Item | Meaning |
-|------|--------|
-| **Input** | \(\text{pixel\_values} \in \mathbb{R}^{N \times 1536}\), \(\text{image\_grid\_thw} \in \mathbb{Z}^{M \times 3}\) with \((T, H, W)\) per image. |
-| **Patch layout** | Spatial patch size \(p = 16\), temporal \(p_t = 2\); \(1536 = 3 \times p_t \times p^2\) (RGB × time × spatial). |
-| **Grid ↔ resolution** | For one image: \(\text{grid\_h} = \lceil H_{\text{img}}/p\rceil\), \(\text{grid\_w} = \lceil W_{\text{img}}/p\rceil\), \(N = T \cdot \text{grid\_h} \cdot \text{grid\_w}\). |
-| **This pipeline** | All images **resized to 384×384** before the processor → grid \((1, 24, 24)\), \(N = 576\) patches. So one nominal resolution: **384×384**. |
-| **Other grids** | ONNX uses dynamic \(N\); other \((T,H,W)\) (e.g. 20×20) are possible if the processor outputs them and export used matching \(\texttt{--vision\_grid}\). |
+- **Input:** pixel_values ∈ R^(N × 1536), image_grid_thw ∈ Z^(M × 3) with (T, H, W) per image.
+- **Patch layout:** Spatial patch size p = 16, temporal p_t = 2; 1536 = 3 × p_t × p² (RGB × time × spatial).
+- **Grid ↔ resolution:** For one image: grid_h = ceil(H_img/p), grid_w = ceil(W_img/p), N = T · grid_h · grid_w.
+- **This pipeline:** All images resized to 384×384 before the processor → grid (1, 24, 24), N = 576 patches. One nominal resolution: 384×384.
+- **Other grids:** ONNX uses dynamic N; other (T, H, W) (e.g. 20×20) are possible if the processor outputs them and export used matching --vision_grid.
 
-- **Short:** “Accepted image sizes” = **any** original image, but the pipeline **resizes to 384×384**; the vision model then sees a fixed grid (e.g. 24×24) and fixed patch dimension 1536.
+**Short:** “Accepted image sizes” = any original image, but the pipeline resizes to 384×384; the vision model then sees a fixed grid (e.g. 24×24) and fixed patch dimension 1536.
 
 ---
 
