@@ -14,6 +14,7 @@ Both scripts support:
 - ✅ Streaming token generation
 - ✅ Customizable sampling parameters
 - ✅ Qwen3 architecture with standard RoPE
+- ✅ **Vision + text (VL) pipeline** – image description and multimodal prompts via `qwen3-vl.py`
 
 ## Prerequisites
 
@@ -260,37 +261,85 @@ If missing, re-run the builder (see `MODEL_BUILDER.md`).
 - Close other applications
 - Consider GPU inference (if available)
 
-## Vision + Text Inference (TBD)
+## Vision + Text Inference (`qwen3-vl.py`)
 
-### Current Status
+The **VL (vision + text) pipeline is working** with ONNX. Use `qwen3-vl.py` for image description and other multimodal tasks.
 
-Vision models are exported successfully:
-- `qwen3vl-vision.onnx` (1.9 GB)
-- Fixed 384×384 input processing
+### Quick Start (PowerShell)
 
-### Planned Features
+From the `qwen3-vl-4b` directory with conda env `onnxruntime-genai` active:
 
-1. **Image preprocessing**: Resize and normalize images to 384×384
-2. **Vision embeddings**: Extract features from images
-3. **Multimodal fusion**: Merge vision and text embeddings
-4. **Position encoding**: 3D position IDs for image tokens
-5. **Full pipeline**: End-to-end image + text generation
-
-### Why Not Implemented Yet?
-
-The multimodal pipeline requires:
-- Proper vision token injection into text embeddings
-- Grid-based 3D position IDs for image patches
-- Vision-text alignment in embedding space
-
-Current focus: Stabilize text-only pipeline before adding vision.
-
-### Workaround
-
-For now, use PyTorch model for vision + text:
-```bash
-python test_pytorch_pipeline.py
+**Single image (default prompt):**
+```powershell
+python .\qwen3-vl.py --text_precision int4 --image .\images\test_checkerboard.jpg --text "Describe this image" --max_new_tokens 50
 ```
+
+**Other images in `images/` folder:**
+```powershell
+python .\qwen3-vl.py --text_precision int4 --image .\images\test_colors.jpg --text "What colors do you see?" --max_new_tokens 50
+python .\qwen3-vl.py --text_precision int4 --image .\images\test_gradient_genai.jpg --text "Describe this image." --max_new_tokens 50
+```
+
+**Use the working vision model** (if you have a known-good vision ONNX):
+```powershell
+python .\qwen3-vl.py --vision_model cpu-fp32/working-vision/qwen3vl-vision.onnx --text_precision int4 --image .\images\test_checkerboard.jpg --text "Describe this image." --max_new_tokens 50
+```
+
+**FP32 text (higher quality, slower):**
+```powershell
+python .\qwen3-vl.py --text_precision fp32 --image .\images\test_checkerboard.jpg --text "Describe this image." --max_new_tokens 50
+```
+
+### Sample Output
+
+Example run (checkerboard image, INT4 text, 50 tokens):
+
+```
+======================================================================
+Multimodal Generation (1 image(s))
+======================================================================
+Prompt: <|image_pad|>
+Describe this image
+======================================================================
+  Processing 1 image(s)...
+    Preprocessed: pixel_values=(576, 1536), grid_thw=(1, 3)
+    Vision embeddings: (144, 2560)
+  ...
+  Generating (max 50 tokens)...
+  This image is a **checkerboard pattern** — specifically, a **black-and-white alternating grid** composed of square tiles.
+
+### Key Features:
+- **Pattern**: Alternating black and white squares arranged in a grid.
+- **Size**: The grid
+
+  Generated 50 tokens
+======================================================================
+[OK] Generation complete!
+```
+
+### Command-Line Arguments (Vision + Text)
+
+```powershell
+python .\qwen3-vl.py --help
+```
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--model_dir` | Model directory (vision/embedding paths are under this) | `.` |
+| `--vision_model` | Path to vision ONNX (overrides default under model_dir) | `model_dir/cpu-fp32/qwen3vl-vision.onnx` |
+| `--text_precision` | `fp32` or `int4` | `fp32` |
+| `--image` | Path(s) to image(s) | (required for VL) |
+| `--text` | Prompt text | `"Describe this image."` |
+| `--max_new_tokens` | Max tokens to generate | `100` |
+| `--temperature`, `--top_k`, `--top_p` | Sampling | See text-only section |
+| `--no_sample` | Greedy decoding | off |
+
+### Requirements
+
+- **Vision ONNX**: `cpu-fp32/qwen3vl-vision.onnx` (or `--vision_model` path). Export with `builder_simple.py -i pytorch --vision` (see `MODEL_BUILDER.md`). For a single-output vision graph matching the reference, use the vision model from `cpu-fp32/working-vision/` if available.
+- **Embedding ONNX**: `cpu-fp32/qwen3vl-embedding.onnx`
+- **Text ONNX**: `cpu-fp32/model.onnx` or `cpu-int4/model.onnx`
+- **Processor/tokenizer**: From `pytorch/` (or model_dir). Images are preprocessed to 384×384; grid 24×24 (576 patches) is used.
 
 ## Technical Details
 
@@ -450,12 +499,86 @@ python qwen3-vl.py \
   --text "What do you see?" \
   --max_new_tokens 100 \
   --text_precision fp32
+
+python qwen3-vl.py \
+  --image images/test_simple_scene.jpg \
+  --text "What do you see?" \
+  --max_new_tokens 100 \
+  --text_precision fp32
 ```
 
 ### Expected Results
 
 **Text-only**: Coherent, factual responses about the topic
 **Vision+text**: Accurate descriptions of image content (colors, patterns, structures)
+
+#### For Simple scene
+
+```
+$python .\qwen3-vl.py  --text_precision int4 --image ..
+
+\test_images\simple_scene.jpg --text "Describe this image" --max_new_tokens 50
+Loading Qwen3-VL Multimodal ONNX Pipeline...
+  Vision: FP32
+  Embeddings: FP32
+  Text: INT4
+
+  Loading models...
+    Vision: qwen3vl-vision.onnx
+    Embeddings: qwen3vl-embedding.onnx
+    Text: model.onnx
+  [OK] All ONNX models loaded
+  [OK] Tokenizer and image processor loaded from local pytorch folder
+
+  Model config:
+    Layers: 36
+    Hidden size: 2560
+    Image token: '<|image_pad|>' (id=151655)
+
+Pipeline ready for multimodal inference!
+
+======================================================================
+Multimodal Generation (1 image(s))
+======================================================================
+Prompt: <|image_pad|>
+Describe this image
+======================================================================
+  Processing 1 image(s)...
+    Preprocessed: pixel_values=(576, 1536), grid_thw=(1, 3)
+    Vision embeddings: (144, 2560)
+    Image tokens per image: [144]
+  Text preparation:
+    Input tokens: 156
+    Text embeddings: (1, 156, 2560)
+    Image token positions: 144 tokens at indices [3, 4, 5, 6, 7]...
+    Vision embeddings to inject: (144, 2560)
+    Merged embeddings: (156, 2560) (injected 144 vision tokens)
+
+  Initial forward pass...
+    Input embeddings: (1, 156, 2560)
+    Attention mask: (1, 156)
+
+  Generating (max 50 tokens)...
+  This image is a **simple, minimalist digital illustration** depicting a **test scene**.
+
+Here’s a breakdown:
+
+- **Background**: A solid light blue background.
+- **Central Element**: A **green rectangle** with a **black border**, positioned
+
+  Generated 50 tokens
+======================================================================
+
+[OK] Generation complete!
+
+Full output:
+This image is a **simple, minimalist digital illustration** depicting a **test scene**.
+
+Here’s a breakdown:
+
+- **Background**: A solid light blue background.
+- **Central Element**: A **green rectangle** with a **black border**, positioned
+```
 
 ## Reference Files
 
@@ -467,12 +590,10 @@ python qwen3-vl.py \
 - `images/` - Test images for vision pipeline
 
 ## Known Limitations
-
-1. **INT4 quality**: FP32 recommended for production (INT4 under investigation)
-2. **Context length**: Limited testing beyond 2048 tokens
-3. **Performance**: CPU-only, no GPU optimization yet
-4. **Batch size**: Fixed to 1, no dynamic batching
-5. **Video support**: Not yet implemented (images only)
+1. **Context length**: Limited testing beyond 2048 tokens
+2. **Performance**: CPU-only, no GPU optimization yet
+3. **Batch size**: Fixed to 1, no dynamic batching
+4. **Video support**: Not yet implemented (images only)
 
 ## Support
 

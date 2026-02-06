@@ -8,52 +8,56 @@ Exports three separate ONNX models:
 """
 
 import argparse
+import importlib.util
 import os
 import shutil
+import sys
 import torch
 from pathlib import Path
 from transformers import AutoConfig, AutoProcessor
 from onnxruntime_genai.models.builder import create_model
 
 
+def _use_pytorch_modeling_file(args):
+    """
+    Copy pytorch_backup/modeling_qwen3_vl.py (repo source of truth) into the
+    transformers package (site-packages) before loading/exporting. The model
+    is then loaded from args.input (e.g. pytorch/ = user's downloaded weights/config);
+    we do not use the installed transformers modeling file.
+    Call this before importing Qwen3VLForConditionalGeneration.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(script_dir, "pytorch_backup", "modeling_qwen3_vl.py")
+    if not os.path.isfile(src):
+        print(f"  [WARNING] Local modeling file not found: {src}")
+        return
+    spec = importlib.util.find_spec("transformers.models.qwen3_vl")
+    if spec is None or not spec.origin:
+        print("  [WARNING] Could not find transformers.models.qwen3_vl package")
+        return
+    pkg_dir = os.path.dirname(spec.origin)
+    dst = os.path.join(pkg_dir, "modeling_qwen3_vl.py")
+    shutil.copy2(src, dst)
+    print(f"  - Copied: {src}")
+    print(f"  - To:     {dst}")
+    # Force reload on next import so the copied file is used
+    for mod in list(sys.modules):
+        if mod == "transformers.models.qwen3_vl.modeling_qwen3_vl" or mod == "transformers.models.qwen3_vl":
+            del sys.modules[mod]
+
+
 def prepare_model(args, load_processor=False):
-    """Copy modified files and load model.
+    """Load model from args.input (e.g. pytorch/ = user's downloaded Qwen3 VL).
     
-    Args:
-        args: Command line arguments
-        load_processor: Whether to load the processor (only needed for text export)
+    Modeling code is injected by _use_pytorch_modeling_file() in main() before this runs:
+    pytorch_backup/modeling_qwen3_vl.py is copied to site-packages so the loaded model uses it.
     """
     print("=" * 80)
     print("Preparing Qwen3-VL Model for ONNX Export")
     print("=" * 80)
     
-    # Copy modified files to input directory
-    print("\n[1/3] Copying modified files to model directory...")
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    pytorch_modified_dir = os.path.join(script_dir, 'pytorch_modified')
-    
-    modified_files = [
-        'modeling_qwen3_vl.py',
-        'modular_qwen3_vl.py',
-        'processing_qwen3_vl.py',
-        'video_processing_qwen3_vl.py',
-        'configuration_qwen3_vl.py'
-    ]
-    
-    for fname in modified_files:
-        src = os.path.join(pytorch_modified_dir, fname)
-        dst = os.path.join(args.input, fname)
-        
-        if os.path.exists(src):
-            shutil.copy(src, dst)
-            print(f"  - Copied: {fname}")
-        else:
-            print(f"  [WARNING] Not found: {fname}")
-    
-    print("  [OK] Modified files copied")
-    
     # Load config
-    print("\n[2/3] Loading configuration...")
+    print("\n[1/2] Loading configuration...")
     config = AutoConfig.from_pretrained(args.input, trust_remote_code=True)
     print(f"  - Model type: {config.model_type}")
     print(f"  - Vision hidden size: {config.vision_config.hidden_size}")
@@ -62,12 +66,12 @@ def prepare_model(args, load_processor=False):
     # Load processor only if needed (for text model export)
     processor = None
     if load_processor:
-        print("\n[3/3] Loading processor and model...")
+        print("\n[2/2] Loading processor and model...")
         processor = AutoProcessor.from_pretrained(args.input, trust_remote_code=True)
     else:
-        print("\n[3/3] Loading model (skipping processor)...")
+        print("\n[2/2] Loading model (skipping processor)...")
     
-    # Import after copying modified files
+    # Import (uses repo's modeling file after _use_pytorch_modeling_file copies it to site-packages)
     from transformers import Qwen3VLForConditionalGeneration
     
     model = Qwen3VLForConditionalGeneration.from_pretrained(
@@ -125,11 +129,14 @@ def build_vision(args, config, processor, model, output_dir):
         
         def forward(self, pixel_values, image_grid_thw):
             outputs = self.visual(pixel_values, grid_thw=image_grid_thw)
-            # Return pooler_output (merged embeddings), not last_hidden_state.
+            # Return single tensor (pooled embeddings) to match working ONNX (one output).
             if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
                 return outputs.pooler_output
             if isinstance(outputs, (tuple, list)) and len(outputs) >= 2:
-                return outputs[1]  # pooler_output is second in BaseModelOutputWithPooling
+                # Vision returns (merged_tensor, deepstack_list); return the tensor only.
+                if isinstance(outputs[1], list):
+                    return outputs[0]
+                return outputs[1]  # BaseModelOutputWithPooling style: pooler is second
             return outputs[0] if isinstance(outputs, (tuple, list)) else outputs
     
     # Skip deepstack during export so graph has single merger path (matches working ONNX).
@@ -423,6 +430,10 @@ def main():
     print("  - No post-processing (optimization/quantization for vision)")
     print("  - Direct embedding export (no vision merging)")
     print(f"  - Text model uses {args.text_precision.upper()} precision")
+    
+    # Copy pytorch_backup/modeling_qwen3_vl.py to site-packages before loading/exporting
+    print("\nUsing repo source pytorch_backup/modeling_qwen3_vl.py (copying to site-packages before load)...")
+    _use_pytorch_modeling_file(args)
     
     # Prepare model (only load processor if building text model)
     config, processor, model = prepare_model(args, load_processor=args.export_text)
