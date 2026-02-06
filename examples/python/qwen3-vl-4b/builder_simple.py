@@ -16,8 +16,13 @@ from transformers import AutoConfig, AutoProcessor
 from onnxruntime_genai.models.builder import create_model
 
 
-def prepare_model(args):
-    """Copy modified files and load model."""
+def prepare_model(args, load_processor=False):
+    """Copy modified files and load model.
+    
+    Args:
+        args: Command line arguments
+        load_processor: Whether to load the processor (only needed for text export)
+    """
     print("=" * 80)
     print("Preparing Qwen3-VL Model for ONNX Export")
     print("=" * 80)
@@ -54,9 +59,13 @@ def prepare_model(args):
     print(f"  - Vision hidden size: {config.vision_config.hidden_size}")
     print(f"  - Text hidden size: {config.text_config.hidden_size}")
     
-    # Load processor
-    print("\n[3/3] Loading processor and model...")
-    processor = AutoProcessor.from_pretrained(args.input, trust_remote_code=True)
+    # Load processor only if needed (for text model export)
+    processor = None
+    if load_processor:
+        print("\n[3/3] Loading processor and model...")
+        processor = AutoProcessor.from_pretrained(args.input, trust_remote_code=True)
+    else:
+        print("\n[3/3] Loading model (skipping processor)...")
     
     # Import after copying modified files
     from transformers import Qwen3VLForConditionalGeneration
@@ -77,52 +86,58 @@ def prepare_model(args):
 
 def build_vision(args, config, processor, model, output_dir):
     """
-    Export vision encoder to ONNX - simplified with fixed dimensions.
+    Export vision encoder to ONNX - single output pooled_embeds (merged patches).
     
-    Fixed image size: 384×384 pixels
-    Patch size: 16×16 → 24×24 = 576 patches
-    Patch features: 3×2×16×16 = 1536
+    Target: 384×384 input (processor reshapes to 384×384).
+    Patch size 16 → grid 24×24 = 576 patches; patch features 3×2×16×16 = 1536.
+    Some processor configs output 20×20 = 400 patches; use --vision_grid 20 to match.
     """
     print("\n" + "=" * 80)
     print("Building Vision Model (Simplified)")
     print("=" * 80)
     print(f"Output directory: {output_dir}")
     
-    print("\n[1/3] Preparing fixed-size dummy inputs...")
+    print("\n[1/3] Preparing dummy inputs...")
     
-    # Fixed dimensions for 384×384 image
-    grid_t, grid_h, grid_w = 1, 24, 24  # temporal=1, spatial=24×24
-    num_patches = grid_t * grid_h * grid_w  # 576 patches
+    # Grid for 384×384: 384/16 = 24 → 24×24 = 576 patches (or --vision_grid 20 for 400 patches)
+    grid_size = args.vision_grid
+    grid_t, grid_h, grid_w = 1, grid_size, grid_size
+    num_patches = grid_t * grid_h * grid_w
     patch_features = 3 * 2 * 16 * 16  # RGB × temporal_patch × spatial_patch²
     
     dummy_pixel_values = torch.randn(num_patches, patch_features)
     dummy_grid_thw = torch.tensor([[grid_t, grid_h, grid_w]], dtype=torch.long)
     
-    print(f"  - Image size: 384×384 (fixed)")
-    print(f"  - Patches: {grid_t}×{grid_h}×{grid_w} = {num_patches}")
+    print(f"  - Image size: 384×384 (processor standard)")
+    print(f"  - Grid: {grid_t}×{grid_h}×{grid_w} = {num_patches} patches")
     print(f"  - Patch features: {patch_features}")
     print(f"  - pixel_values: {dummy_pixel_values.shape}")
     print(f"  - grid_thw: {dummy_grid_thw.shape}")
     
-    print("\n[2/3] Creating vision wrapper...")
+    print("\n[2/3] Creating vision wrapper (pooler_output only, no deepstack)...")
     
-    # Wrapper to extract only pooler_output
+    # Wrapper returns only pooler_output (merged hidden states) to match working ONNX.
+    # ModelOutput order: last_hidden_state, pooler_output, deepstack_features.
     class VisionWrapper(torch.nn.Module):
         def __init__(self, visual_model):
             super().__init__()
             self.visual = visual_model
         
         def forward(self, pixel_values, image_grid_thw):
-            outputs = self.visual(pixel_values, grid_thw=image_grid_thw, return_dict=True)
-            # Return pooler_output (merged patches for LLM)
-            if hasattr(outputs, 'pooler_output'):
+            outputs = self.visual(pixel_values, grid_thw=image_grid_thw)
+            # Return pooler_output (merged embeddings), not last_hidden_state.
+            if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
                 return outputs.pooler_output
-            elif isinstance(outputs, dict):
-                return outputs['pooler_output']
-            else:
-                return outputs[1]  # Tuple: (last_hidden_state, pooler_output)
+            if isinstance(outputs, (tuple, list)) and len(outputs) >= 2:
+                return outputs[1]  # pooler_output is second in BaseModelOutputWithPooling
+            return outputs[0] if isinstance(outputs, (tuple, list)) else outputs
     
-    wrapped_model = VisionWrapper(model.model.visual)
+    # Skip deepstack during export so graph has single merger path (matches working ONNX).
+    visual = model.model.visual
+    old_skip = getattr(visual, '_skip_deepstack_export', None)
+    visual._skip_deepstack_export = True
+    
+    wrapped_model = VisionWrapper(visual)
     wrapped_model.eval()
     
     # Force eager attention (workaround for GQA/SDPA export issues)
@@ -149,7 +164,7 @@ def build_vision(args, config, processor, model, output_dir):
             dynamic_axes={
                 "pixel_values": {0: "num_patches"},
                 "image_grid_thw": {0: "num_images"},
-                "pooled_embeds": {0: "num_merged_patches"}
+                "pooled_embeds": {0: "num_merged_patches"},
             },
             opset_version=17,
             do_constant_folding=True,
@@ -163,11 +178,18 @@ def build_vision(args, config, processor, model, output_dir):
         raise
     
     finally:
-        # Restore original attention
+        # Restore original attention and deepstack flag
         if original_attn:
             model.config._attn_implementation = original_attn
         if 'original_vision_attn' in locals():
             model.model.visual.config._attn_implementation = original_vision_attn
+        if old_skip is not None:
+            visual._skip_deepstack_export = old_skip
+        else:
+            try:
+                del visual._skip_deepstack_export
+            except AttributeError:
+                pass
 
 
 def build_embedding(args, config, processor, model, output_dir):
@@ -309,7 +331,43 @@ def get_args():
         help="Cache directory for temporary files",
     )
     
+    # Export control arguments
+    parser.add_argument(
+        "--vision",
+        action="store_true",
+        help="Export vision model only",
+    )
+    
+    parser.add_argument(
+        "--embedding",
+        action="store_true",
+        help="Export embedding model only",
+    )
+    
+    parser.add_argument(
+        "--text",
+        action="store_true",
+        help="Export text model only",
+    )
+    
+    parser.add_argument(
+        "--vision_grid",
+        type=int,
+        default=24,
+        help="Spatial grid size for vision export (24 → 24×24=576 patches for 384×384; use 20 for 400 patches if processor outputs 20×20)",
+    )
+    
     args = parser.parse_args()
+    
+    # If no specific model is selected, export all
+    if not args.vision and not args.embedding and not args.text:
+        args.export_vision = True
+        args.export_embedding = True
+        args.export_text = True
+    else:
+        args.export_vision = args.vision
+        args.export_embedding = args.embedding
+        args.export_text = args.text
     
     # Convert precision string to torch dtype
     args.precision = torch.float16 if args.precision == "fp16" else torch.float32
@@ -349,34 +407,55 @@ def main():
     print(f"Text precision: {args.text_precision}")
     print(f"Execution provider: {args.execution_provider}")
     print(f"Device: {args.device}")
+    
+    # Show what will be exported
+    export_list = []
+    if args.export_vision:
+        export_list.append("vision")
+    if args.export_embedding:
+        export_list.append("embedding")
+    if args.export_text:
+        export_list.append("text")
+    print(f"\nExporting: {', '.join(export_list)}")
+    
     print("\nSimplifications:")
     print("  - Fixed image size: 384×384 pixels")
     print("  - No post-processing (optimization/quantization for vision)")
     print("  - Direct embedding export (no vision merging)")
     print(f"  - Text model uses {args.text_precision.upper()} precision")
     
-    # Prepare model
-    config, processor, model = prepare_model(args)
+    # Prepare model (only load processor if building text model)
+    config, processor, model = prepare_model(args, load_processor=args.export_text)
     
-    # Build components
-    build_vision(args, config, processor, model, args.vision_output)
-    build_embedding(args, config, processor, model, args.embedding_output)
-    build_text(args, config, processor, model, args.text_output, args.text_precision)
+    # Build selected components
+    exported = []
     
+    if args.export_vision:
+        build_vision(args, config, processor, model, args.vision_output)
+        exported.append(("Vision", args.vision_output, "qwen3vl-vision.onnx"))
+    
+    if args.export_embedding:
+        build_embedding(args, config, processor, model, args.embedding_output)
+        exported.append(("Embedding", args.embedding_output, "qwen3vl-embedding.onnx"))
+    
+    if args.export_text:
+        build_text(args, config, processor, model, args.text_output, args.text_precision)
+        exported.append(("Text", args.text_output, "model.onnx"))
+    
+    # Summary
     print("\n" + "=" * 80)
-    print("[OK] All ONNX models exported successfully!")
+    print("[OK] ONNX model(s) exported successfully!")
     print("=" * 80)
     precision_str = "FP32" if args.precision == torch.float32 else "FP16"
-    print(f"\nVision/Embedding models: {args.vision_output}")
-    print(f"  - qwen3vl-vision.onnx ({precision_str}, fixed 384×384 input)")
-    print(f"  - qwen3vl-embedding.onnx ({precision_str})")
-    print(f"\nText model: {args.text_output}")
-    print(f"  - model.onnx ({args.text_precision.upper()})")
-    print(f"  - genai_config.json")
-    print(f"  - tokenizer files")
+    
+    for name, output_dir, filename in exported:
+        print(f"\n{name} model: {output_dir}")
+        print(f"  - {filename}")
+    
     print("\nNext steps:")
-    print("  1. Test with: python qwen3-vl.py --text 'Hello' --max_new_tokens 20")
-    print("  2. For images, resize to 384×384 before processing")
+    print("  1. Test text+image: python qwen3-vl.py --image images/test_checkerboard.jpg --text 'Describe this.' --max_new_tokens 50")
+    print("  2. If vision fails with Reshape (e.g. 576 vs 400), re-export with --vision_grid 20 to match 400 patches.")
+    print("  3. Processor should output 384×384; grid (e.g. 24×24 or 20×20) must match --vision_grid.")
     print()
 
 

@@ -29,11 +29,12 @@ if sys.platform == 'win32':
         sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 try:
-    from transformers import AutoProcessor
+    from transformers import PreTrainedTokenizerFast, Qwen2VLImageProcessor
+    from tokenizers import Tokenizer
     import torch  # Needed for image processor tensor conversion
 except ImportError as e:
     print(f"Error: Required library not found: {e}")
-    print("Install with: pip install transformers torch pillow")
+    print("Install with: pip install transformers torch pillow tokenizers")
     raise
 
 
@@ -47,7 +48,8 @@ class Qwen3VLMultimodalPipeline:
         self,
         model_dir: str = ".",
         text_precision: str = "fp32",
-        execution_provider: str = "CPUExecutionProvider"
+        execution_provider: str = "CPUExecutionProvider",
+        vision_model: Optional[str] = None,
     ):
         self.model_dir = Path(model_dir)
         self.text_precision = text_precision
@@ -58,8 +60,11 @@ class Qwen3VLMultimodalPipeline:
         print(f"  Embeddings: FP32")
         print(f"  Text: {text_precision.upper()}")
         
-        # Load ONNX models
-        vision_path = self.model_dir / "cpu-fp32" / "qwen3vl-vision.onnx"
+        # Load ONNX models (optional custom vision model path, e.g. working-vision)
+        if vision_model:
+            vision_path = Path(vision_model)
+        else:
+            vision_path = self.model_dir / "cpu-fp32" / "qwen3vl-vision.onnx"
         embedding_path = self.model_dir / "cpu-fp32" / "qwen3vl-embedding.onnx"
         text_path = self.model_dir / f"cpu-{text_precision}" / "model.onnx"
         
@@ -75,16 +80,35 @@ class Qwen3VLMultimodalPipeline:
         print(f"    Text: {text_path.name}")
         print("  [OK] All ONNX models loaded")
         
-        # Load HuggingFace processor (for image preprocessing and tokenization)
+        # Load tokenizer and image processor from local pytorch folder
+        # Using tokenizers library directly to avoid AutoProcessor bug in transformers 4.57.x
         pytorch_dir = self.model_dir / "pytorch"
-        self.processor = AutoProcessor.from_pretrained(
-            str(pytorch_dir),
-            trust_remote_code=True
-        )
-        self.tokenizer = self.processor.tokenizer
-        self.image_processor = self.processor.image_processor
         
-        print("  [OK] Processor (tokenizer + image processor) loaded")
+        # Load tokenizer directly from tokenizer.json using tokenizers library
+        tokenizer_path = pytorch_dir / "tokenizer.json"
+        tokenizer_config_path = pytorch_dir / "tokenizer_config.json"
+        
+        # Load base tokenizer
+        base_tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        
+        # Load tokenizer config for special tokens and chat template
+        with open(tokenizer_config_path) as f:
+            tokenizer_config = json.load(f)
+        
+        # Wrap with PreTrainedTokenizerFast
+        self.tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=base_tokenizer,
+            bos_token=tokenizer_config.get("bos_token"),
+            eos_token=tokenizer_config.get("eos_token"),
+            unk_token=tokenizer_config.get("unk_token"),
+            pad_token=tokenizer_config.get("pad_token"),
+            chat_template=tokenizer_config.get("chat_template"),
+        )
+        
+        # Load image processor
+        self.image_processor = Qwen2VLImageProcessor.from_pretrained(str(pytorch_dir))
+        
+        print("  [OK] Tokenizer and image processor loaded from local pytorch folder")
         
         # Load model config
         config_path = self.model_dir / f"cpu-{text_precision}" / "genai_config.json"
@@ -124,8 +148,15 @@ class Qwen3VLMultimodalPipeline:
         """
         print(f"  Processing {len(image_paths)} image(s)...")
         
-        # Load images
-        images = [Image.open(path).convert('RGB') for path in image_paths]
+        # Load images and resize to 384×384 so processor outputs 24×24 grid (576 patches),
+        # matching the vision ONNX export (builder_simple.py default --vision_grid 24).
+        target_size = (384, 384)
+        images = []
+        for path in image_paths:
+            img = Image.open(path).convert("RGB")
+            if img.size != target_size:
+                img = img.resize(target_size, Image.BILINEAR)
+            images.append(img)
         
         # Preprocess using HuggingFace processor
         try:
@@ -140,6 +171,9 @@ class Qwen3VLMultimodalPipeline:
             grid_thw = inputs["image_grid_thw"].cpu().numpy()
         
         print(f"    Preprocessed: pixel_values={pixel_values.shape}, grid_thw={grid_thw.shape}")
+        
+        # Vision ONNX expects int64 for image_grid_thw (processor may return int32)
+        grid_thw = np.asarray(grid_thw, dtype=np.int64)
         
         # Run vision encoder ONNX model
         vision_outputs = self.vision_session.run(
@@ -475,6 +509,12 @@ def main():
         help="Path to model directory"
     )
     parser.add_argument(
+        "--vision_model",
+        type=str,
+        default=None,
+        help="Path to vision ONNX model (e.g. cpu-fp32/working-vision/qwen3vl-vision.onnx). If not set, uses model_dir/cpu-fp32/qwen3vl-vision.onnx"
+    )
+    parser.add_argument(
         "--text_precision",
         type=str,
         default="fp32",
@@ -529,7 +569,8 @@ def main():
     pipeline = Qwen3VLMultimodalPipeline(
         model_dir=args.model_dir,
         text_precision=args.text_precision,
-        execution_provider="CPUExecutionProvider"
+        execution_provider="CPUExecutionProvider",
+        vision_model=args.vision_model,
     )
     
     # Prepare prompt with image placeholders

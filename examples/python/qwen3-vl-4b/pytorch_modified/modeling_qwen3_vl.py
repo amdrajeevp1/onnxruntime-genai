@@ -843,7 +843,12 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
-            if layer_num in self.deepstack_visual_indexes:
+            # Skip deepstack path during ONNX export so the traced graph uses only the
+            # single final merger (matches working vision ONNX; deepstack is not used for pooler_output).
+            # Builder sets _skip_deepstack_export=True before export so we skip even when is_tracing is not set.
+            if layer_num in self.deepstack_visual_indexes and not (
+                getattr(self, "_skip_deepstack_export", False) or torch.jit.is_tracing()
+            ):
                 deepstack_feature = self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](
                     hidden_states
                 )
