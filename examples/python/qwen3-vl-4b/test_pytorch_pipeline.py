@@ -37,7 +37,7 @@ def test_pytorch_pipeline():
     ]
     
     for fname in modified_files:
-        src = os.path.join(pytorch_modified_dir, fname)
+        src = os.path.join(pytorch_backup_dir, fname)
         dst = os.path.join(pytorch_dir, fname)
         
         if os.path.exists(src):

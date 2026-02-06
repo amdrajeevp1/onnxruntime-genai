@@ -487,7 +487,7 @@ For production ONNX deployment, **Qwen3-VL's approach is the right choice**. The
 **Qwen3-VL**:
 - `examples/python/qwen3-vl-4b/builder_simple.py` - Vision export logic (lines 86-165)
 - `examples/python/qwen3-vl-4b/qwen3-vl.py` - Multimodal pipeline
-- `pytorch_modified/modeling_qwen3_vl.py` - Modified vision model
+- `pytorch_backup/modeling_qwen3_vl.py` - ONNX-compatible vision model (single output)
 
 **Phi-4-MM**:
 - `examples/python/phi4-multi-modal/pytorch/processing_phi4mm.py` - Dynamic preprocessing
