@@ -27,7 +27,7 @@ struct ModelType {
 
   inline static bool IsQwen25VL(const std::string& model_type) {
     // Qwen25-VL specific check for 3D position IDs
-    return model_type == "fara" || model_type == "qwen2_5_vl";
+    return model_type == "fara" || model_type == "qwen2_5_vl" || model_type == "qwen3_vl";
   }
 
   inline static bool IsALM(const std::string& model_type) {
