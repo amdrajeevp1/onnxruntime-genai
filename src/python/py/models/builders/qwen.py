@@ -688,6 +688,8 @@ class Qwen25VLTextModel(Model):
 class Qwen3VLTextModel(Qwen25VLTextModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        # GenAI config "model.type" must match C++ runtime checks.
+        self.model_type = "qwen3_vl"
         # Keep Qwen3-VL-specific Q/K RMSNorm behavior scoped to this class.
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
