@@ -15,18 +15,16 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoProcessor
+from transformers import AutoConfig, AutoProcessor, Qwen3VLForConditionalGeneration
 
 from onnxruntime_genai.models.builder import create_model
 
 
-def prepare_model(input_dir):
+def prepare_model(input_dir, reference_dir):
     """Load HF model/processor from local path."""
     print("\n[1/4] Preparing model...")
     config = AutoConfig.from_pretrained(input_dir, trust_remote_code=True)
     processor = AutoProcessor.from_pretrained(input_dir, trust_remote_code=True)
-
-    from transformers import Qwen3VLForConditionalGeneration
 
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         input_dir,
@@ -48,12 +46,10 @@ def export_vision_model(model, output_dir):
         def __init__(self, visual_model):
             super().__init__()
             self.visual_model = visual_model
-            # Export uses a fixed image grid but keeps image_grid_thw as formal input for runtime ABI.
-            self.register_buffer("export_grid_thw", torch.tensor([[1, 24, 24]], dtype=torch.int64), persistent=False)
 
         def forward(self, pixel_values, image_grid_thw):
-            _ = image_grid_thw
-            outputs = self.visual_model(pixel_values, grid_thw=self.export_grid_thw, return_dict=True)
+            # Keep image_grid_thw as a true dynamic runtime input.
+            outputs = self.visual_model(pixel_values, grid_thw=image_grid_thw, return_dict=True)
             if hasattr(outputs, "pooler_output"):
                 return outputs.pooler_output
             if isinstance(outputs, dict):
@@ -63,7 +59,7 @@ def export_vision_model(model, output_dir):
 
     wrapper = VisionWrapper(model.model.visual)
 
-    # 384x384 with patch/merge settings gives 576 patches; patch_dim=1536 for Qwen3-VL.
+    # Export with a representative single image grid; runtime grid_thw remains dynamic.
     num_patches = 576
     patch_dim = 1536
     pixel_values = torch.randn(num_patches, patch_dim)
@@ -164,16 +160,6 @@ def create_vision_processor_config(output_dir):
                 },
                 {
                     "operation": {
-                        "name": "resize",
-                        "type": "Resize",
-                        "attrs": {
-                            "height": 384,
-                            "width": 384
-                        }
-                    }
-                },
-                {
-                    "operation": {
                         "name": "rescale",
                         "type": "Rescale"
                     }
@@ -183,8 +169,9 @@ def create_vision_processor_config(output_dir):
                         "name": "normalize",
                         "type": "Normalize",
                         "attrs": {
-                            "mean": [0.48145466, 0.4578275, 0.40821073],
-                            "std": [0.26862954, 0.26130258, 0.27577711]
+                            # Match qwen3 preprocessor_config defaults.
+                            "mean": [0.5, 0.5, 0.5],
+                            "std": [0.5, 0.5, 0.5]
                         }
                     }
                 }
@@ -274,6 +261,12 @@ def main():
         help="Input PyTorch model directory"
     )
     parser.add_argument(
+        "--reference",
+        type=str,
+        default="./pytorch_reference",
+        help="Directory containing local export-patched modeling_qwen3_vl.py"
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="./qwen3vl-oga-fp32-int4",
@@ -308,6 +301,11 @@ def main():
         input_dir = os.path.normpath(os.path.join(script_dir, args.input))
     else:
         input_dir = args.input
+
+    if not os.path.isabs(args.reference):
+        reference_dir = os.path.normpath(os.path.join(script_dir, args.reference))
+    else:
+        reference_dir = args.reference
     
     if not os.path.isabs(args.output):
         output_dir = os.path.normpath(os.path.join(script_dir, args.output))
@@ -318,6 +316,7 @@ def main():
     print("Qwen3-VL ONNX Export for OGA Integration")
     print("=" * 80)
     print(f"\nInput:  {input_dir}")
+    print(f"Reference: {reference_dir}")
     print(f"Output: {output_dir}")
     print(f"Text precision: {args.precision.upper()}")
     
@@ -325,7 +324,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     
     # Prepare model
-    _config, _processor, model = prepare_model(input_dir)
+    _config, _processor, model = prepare_model(input_dir, reference_dir)
     
     # Export models
     export_vision_model(model, output_dir)
