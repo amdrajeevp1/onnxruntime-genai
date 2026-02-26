@@ -128,6 +128,7 @@ std::unique_ptr<OrtValue> ConvertPixelValues(const OrtValue& float_tensor,
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
                    OrtxTensor* pixel_values, OrtxTensor* image_grid_thw,
+                   const int64_t* computed_grid_data, int64_t computed_grid_num_images,
                    Ort::Allocator& allocator, int64_t spatial_merge_size) {
   constexpr char vision_start_token[] = "<|vision_start|>";
   constexpr char vision_end_token[] = "<|vision_end|>";
@@ -136,35 +137,27 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   int64_t num_images = 0;
   int64_t total_image_tokens = 0;
   const int64_t* image_grid_thw_data = nullptr;
-  std::vector<int64_t> computed_grid_thw;
-
   if (pixel_values) {
-    // Get image_grid_thw data
+    // Get image_grid_thw data from either processor output or computed fallback.
     if (image_grid_thw) {
       const int64_t* image_grid_thw_shape{};
       size_t image_grid_thw_num_dims;
       CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&image_grid_thw_data),
                                     &image_grid_thw_shape, &image_grid_thw_num_dims));
       num_images = image_grid_thw_shape[0];
+    } else if (computed_grid_data) {
+      image_grid_thw_data = computed_grid_data;
+      num_images = computed_grid_num_images;
+    }
 
-      // Calculate total image tokens based on grid dimensions
-      // For each image: (temporal * height * width) / (merge_size^2)
-      for (int64_t i = 0; i < num_images; ++i) {
-        int64_t t = image_grid_thw_data[i * 3 + 0];
-        int64_t h = image_grid_thw_data[i * 3 + 1];
-        int64_t w = image_grid_thw_data[i * 3 + 2];
-        int64_t tokens = (t * h * w) / (spatial_merge_size * spatial_merge_size);
-        total_image_tokens += tokens;
-      }
-    } else {
-      // image_grid_thw not provided - compute from fixed 384x384 with 16x16 patches
-      // For Qwen3-VL: 384/16 = 24 patches per side
-      num_images = 1;  // Assuming single image
-      computed_grid_thw = {1, 24, 24};  // [temporal, height_patches, width_patches]
-      image_grid_thw_data = computed_grid_thw.data();
-      
-      int64_t t = 1, h = 24, w = 24;
-      total_image_tokens = (t * h * w) / (spatial_merge_size * spatial_merge_size);
+    // Calculate total image tokens based on grid dimensions
+    // For each image: (temporal * height * width) / (merge_size^2)
+    for (int64_t i = 0; i < num_images; ++i) {
+      int64_t t = image_grid_thw_data[i * 3 + 0];
+      int64_t h = image_grid_thw_data[i * 3 + 1];
+      int64_t w = image_grid_thw_data[i * 3 + 2];
+      int64_t tokens = (t * h * w) / (spatial_merge_size * spatial_merge_size);
+      total_image_tokens += tokens;
     }
   }
 
@@ -272,7 +265,7 @@ std::unique_ptr<NamedTensors> Qwen3VLImageProcessor::Process(const Tokenizer& to
   auto named_tensors = std::make_unique<NamedTensors>();
 
   if (!images || images->num_images_ == 0) {
-    auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, allocator, spatial_merge_size_);
+    auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, nullptr, 0, allocator, spatial_merge_size_);
     named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
     return named_tensors;
@@ -287,9 +280,6 @@ std::unique_ptr<NamedTensors> Qwen3VLImageProcessor::Process(const Tokenizer& to
   OrtxTensor* image_grid_thw = nullptr;
   // Try to get image_grid_thw from processor (second output)
   OrtxTensorResultGetAt(result.get(), 1, &image_grid_thw);
-
-  auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values, image_grid_thw, allocator, spatial_merge_size_);
-  named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
 
   // Process pixel_values - convert from CHW to patch format
   const void* pixel_data{};
@@ -336,25 +326,81 @@ std::unique_ptr<NamedTensors> Qwen3VLImageProcessor::Process(const Tokenizer& to
     throw std::runtime_error("Expected pixel_values in CHW [3,H,W] or HWC [H,W,3] layout.");
   }
 
-  // Qwen3-VL expects 384x384 images
-  if (height != 384 || width != 384) {
-    throw std::runtime_error("Qwen3-VL expects 384x384 images, got " + 
-                             std::to_string(height) + "x" + std::to_string(width) + 
-                             ". Please ensure vision_processor.json includes a Resize operation to 384x384.");
-  }
-
-  // Convert to patch format for Qwen3-VL vision model.
   const int64_t patch_size = 16;
   const int64_t temporal_patch_size = 2;
+  if (height < patch_size || width < patch_size) {
+    throw std::runtime_error("Qwen3-VL expects images at least 16x16. Got " +
+                             std::to_string(height) + "x" + std::to_string(width) + ".");
+  }
+  // Dynamic-size behavior: accept arbitrary sizes and sanitize to patch grid dimensions that are
+  // compatible with spatial merge (drop right/bottom remainder as needed).
+  const int64_t raw_height_patches = height / patch_size;
+  const int64_t raw_width_patches = width / patch_size;
+  const int64_t height_patches = raw_height_patches - (raw_height_patches % spatial_merge_size_);
+  const int64_t width_patches = raw_width_patches - (raw_width_patches % spatial_merge_size_);
+  if (height_patches <= 0 || width_patches <= 0) {
+    throw std::runtime_error("Qwen3-VL requires at least one spatial-merge compatible patch region. "
+                             "Got grid " + std::to_string(raw_height_patches) + "x" + std::to_string(raw_width_patches) +
+                             " with merge size " + std::to_string(spatial_merge_size_) + ".");
+  }
+  const int64_t effective_height = height_patches * patch_size;
+  const int64_t effective_width = width_patches * patch_size;
+
+  std::unique_ptr<OrtValue> computed_image_grid_thw;
+  const int64_t* computed_grid_data = nullptr;
+  int64_t computed_grid_num_images = 0;
+  computed_image_grid_thw = OrtValue::CreateTensor<int64_t>(allocator, std::vector<int64_t>{1, 3});
+  auto* grid_data = computed_image_grid_thw->GetTensorMutableData<int64_t>();
+  grid_data[0] = 1;
+  grid_data[1] = height_patches;
+  grid_data[2] = width_patches;
+  computed_grid_data = grid_data;
+  computed_grid_num_images = 1;
+
+  auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values, nullptr,
+                                                        computed_grid_data, computed_grid_num_images, allocator, spatial_merge_size_);
+  named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
+
+  // Convert to patch format for Qwen3-VL vision model.
   std::unique_ptr<OrtValue> patch_tensor;
   if (is_chw) {
-    patch_tensor = ConvertToPatch(static_cast<const float*>(pixel_data),
-                                  channels, height, width,
-                                  patch_size, temporal_patch_size, allocator);
+    if (effective_height == height && effective_width == width) {
+      patch_tensor = ConvertToPatch(static_cast<const float*>(pixel_data),
+                                    channels, height, width,
+                                    patch_size, temporal_patch_size, allocator);
+    } else {
+      // Crop to merge-compatible region before patch conversion.
+      std::vector<float> cropped(static_cast<size_t>(channels * effective_height * effective_width));
+      const float* src = static_cast<const float*>(pixel_data);
+      for (int64_t c = 0; c < channels; ++c) {
+        for (int64_t h = 0; h < effective_height; ++h) {
+          const int64_t src_row = c * (height * width) + h * width;
+          const int64_t dst_row = c * (effective_height * effective_width) + h * effective_width;
+          std::copy(src + src_row, src + src_row + effective_width, cropped.data() + dst_row);
+        }
+      }
+      patch_tensor = ConvertToPatch(cropped.data(),
+                                    channels, effective_height, effective_width,
+                                    patch_size, temporal_patch_size, allocator);
+    }
   } else {
-    patch_tensor = ConvertToPatchHWC(static_cast<const float*>(pixel_data),
-                                     channels, height, width,
-                                     patch_size, temporal_patch_size, allocator);
+    if (effective_height == height && effective_width == width) {
+      patch_tensor = ConvertToPatchHWC(static_cast<const float*>(pixel_data),
+                                       channels, height, width,
+                                       patch_size, temporal_patch_size, allocator);
+    } else {
+      // Crop to merge-compatible region before patch conversion.
+      std::vector<float> cropped(static_cast<size_t>(effective_height * effective_width * channels));
+      const float* src = static_cast<const float*>(pixel_data);
+      for (int64_t h = 0; h < effective_height; ++h) {
+        const int64_t src_row = h * width * channels;
+        const int64_t dst_row = h * effective_width * channels;
+        std::copy(src + src_row, src + src_row + effective_width * channels, cropped.data() + dst_row);
+      }
+      patch_tensor = ConvertToPatchHWC(cropped.data(),
+                                       channels, effective_height, effective_width,
+                                       patch_size, temporal_patch_size, allocator);
+    }
   }
 
   // Convert to target type if needed
@@ -362,46 +408,8 @@ std::unique_ptr<NamedTensors> Qwen3VLImageProcessor::Process(const Tokenizer& to
   named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                          std::make_shared<Tensor>(std::move(converted_tensor)));
 
-  // Add image_grid_thw tensor
-  if (image_grid_thw) {
-    // Get the tensor data and shape from OrtxTensor
-    const int64_t* grid_data{};
-    const int64_t* grid_shape{};
-    size_t grid_num_dims;
-    CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&grid_data),
-                                  &grid_shape, &grid_num_dims));
-
-    // Squeeze out leading dimension of size 1
-    std::vector<int64_t> grid_target_shape;
-    size_t grid_squeeze_offset = 0;
-    if (grid_num_dims >= 3 && grid_shape[0] == 1) {
-      // Skip the batch dimension
-      grid_squeeze_offset = 1;
-    }
-    for (size_t i = grid_squeeze_offset; i < grid_num_dims; ++i) {
-      grid_target_shape.push_back(grid_shape[i]);
-    }
-
-    // Ensure we have rank 2 [num_images, 3]
-    if (grid_target_shape.size() != 2 || grid_target_shape[1] != 3) {
-      throw std::runtime_error("image_grid_thw must have shape [num_images, 3], got shape with " +
-                               std::to_string(grid_target_shape.size()) + " dimensions");
-    }
-
-    int64_t num_grid_elements = std::accumulate(grid_target_shape.begin(), grid_target_shape.end(), 1LL, std::multiplies<int64_t>());
-    auto grid_tensor = OrtValue::CreateTensor<int64_t>(allocator, grid_target_shape);
-    std::copy(grid_data, grid_data + num_grid_elements, grid_tensor->GetTensorMutableData<int64_t>());
-
-    named_tensors->emplace("image_grid_thw", std::make_shared<Tensor>(std::move(grid_tensor)));
-  } else {
-    // Create computed grid_thw for fixed 384x384 images
-    auto grid_tensor = OrtValue::CreateTensor<int64_t>(allocator, std::vector<int64_t>{1, 3});
-    auto* grid_data = grid_tensor->GetTensorMutableData<int64_t>();
-    grid_data[0] = 1;   // temporal
-    grid_data[1] = 24;  // height in patches (384/16)
-    grid_data[2] = 24;  // width in patches (384/16)
-    named_tensors->emplace("image_grid_thw", std::make_shared<Tensor>(std::move(grid_tensor)));
-  }
+  // Use sanitized computed grid so vision input, prompt replacement and embedding merge stay consistent.
+  named_tensors->emplace("image_grid_thw", std::make_shared<Tensor>(std::move(computed_image_grid_thw)));
 
   named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
 
