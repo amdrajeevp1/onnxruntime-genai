@@ -5,7 +5,6 @@ import argparse
 import glob
 import os
 import time
-from pathlib import Path
 
 def resolve_og_api():
     """Resolve Python API for both regular and local/dev package layouts."""
@@ -29,18 +28,6 @@ def resolve_og_api():
     return og_native
 
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
-
-
-def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
-    curr_path = Path(current_dir).absolute()
-    target_dir = glob.glob(target_dir_name, root_dir=curr_path)
-    if target_dir:
-        return Path(curr_path / target_dir[0]).absolute()
-    else:
-        if curr_path.parent == curr_path:
-            # Root dir
-            return None
-        return _find_dir_contains_sub_dir(curr_path / "..", target_dir_name)
 
 
 def _complete(text, state):
@@ -110,14 +97,7 @@ def run(args: argparse.Namespace):
     while True:
         image_paths = get_image_paths(
             user_provided_paths=args.image_paths,
-            default_paths=[
-                str(
-                    _find_dir_contains_sub_dir(Path(__file__).parent, "test")
-                    / "test_models"
-                    / "images"
-                    / "australia.jpg"
-                )
-            ],
+            default_paths=[],
             interactive=interactive,
         )
 

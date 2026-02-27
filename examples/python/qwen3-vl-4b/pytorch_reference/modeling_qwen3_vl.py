@@ -614,8 +614,25 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
 
         self.gradient_checkpointing = False
 
-    def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
+    def rot_pos_emb(self, grid_thw: torch.Tensor, token_count: Optional[int] = None) -> torch.Tensor:
         merge_size = self.spatial_merge_size
+        if torch.jit.is_tracing():
+            # Export-safe dynamic path: avoid Python scalar extraction/loops.
+            if token_count is None:
+                raise ValueError("token_count must be provided in tracing mode")
+            grid = grid_thw[0]
+            h = grid[1]
+            w = grid[2]
+            seq_idx = torch.arange(token_count, device=grid_thw.device, dtype=torch.long)
+            spatial_tokens = h * w
+            spatial_idx = torch.remainder(seq_idx, spatial_tokens)
+            row = torch.div(spatial_idx, w, rounding_mode="floor")
+            col = torch.remainder(spatial_idx, w)
+
+            inv_freq = self.rotary_pos_emb.inv_freq.to(device=grid_thw.device)
+            row_freq = row.to(inv_freq.dtype).unsqueeze(-1) * inv_freq.unsqueeze(0)
+            col_freq = col.to(inv_freq.dtype).unsqueeze(-1) * inv_freq.unsqueeze(0)
+            return torch.cat((row_freq, col_freq), dim=-1)
 
         max_hw = int(grid_thw[:, 1:].max().item())
         freq_table = self.rotary_pos_emb(max_hw)  # (max_hw, dim // 2)
@@ -740,7 +757,7 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
             pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         hidden_states = hidden_states + pos_embeds
 
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        rotary_pos_emb = self.rot_pos_emb(grid_thw, token_count=hidden_states.shape[0])
 
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(seq_len, -1)
@@ -1083,8 +1100,10 @@ class Qwen3VLModel(Qwen3VLPreTrainedModel):
         """
         pixel_values = pixel_values.type(self.visual.dtype)
         image_embeds, deepstack_image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
-        split_sizes = (image_grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
-        image_embeds = torch.split(image_embeds, split_sizes)
+        split_sizes = image_grid_thw.prod(-1) // self.visual.spatial_merge_size**2
+        if torch.jit.is_tracing():
+            return image_embeds, deepstack_image_embeds
+        image_embeds = torch.split(image_embeds, split_sizes.tolist())
         return image_embeds, deepstack_image_embeds
 
     def get_placeholder_mask(
