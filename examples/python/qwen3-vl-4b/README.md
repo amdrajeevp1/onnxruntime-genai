@@ -2,7 +2,15 @@
 
 Minimal steps to export and run Qwen3-VL with dynamic image size support.
 
-## 1) Export ONNX package
+## 1) Download Qwen3-VL-4B into local `pytorch` folder
+
+From `examples/python/qwen3-vl-4b`:
+
+```powershell
+huggingface-cli download Qwen/Qwen3-VL-4B --local-dir "./pytorch"
+```
+
+## 2) Export ONNX package
 
 From `examples/python/qwen3-vl-4b`:
 
@@ -25,7 +33,7 @@ From `examples/python/qwen3-vl-4b`:
 ```
 
 
-## 2) Sanity test: chat only
+## 3) Sanity test: chat only
 
 From repo root:
 
@@ -49,7 +57,7 @@ Hello!
 Total Time : 0.10
 ```
 
-## 3) Sanity test: image + chat
+## 4) Sanity test: image + chat
 
 ```powershell
 & "C:\Users\rajeevp\AppData\Local\miniconda3\envs\onnxruntime-genai\python.exe" `
