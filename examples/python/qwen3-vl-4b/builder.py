@@ -150,48 +150,43 @@ def export_text_model(input_dir, output_dir, precision="int4"):
 
 
 def create_vision_processor_config(output_dir):
-    """Create vision_processor.json in runtime-expected processor schema."""
+    """Create vision_processor.json with always-dynamic image preprocessing."""
+    transforms = [
+        {
+            "operation": {
+                "name": "decode_image",
+                "type": "DecodeImage",
+                "attrs": {
+                    "color_space": "RGB"
+                }
+            }
+        }
+    ]
+    transforms.extend(
+        [
+            {
+                "operation": {
+                    "name": "rescale",
+                    "type": "Rescale"
+                }
+            },
+            {
+                "operation": {
+                    "name": "normalize",
+                    "type": "Normalize",
+                    "attrs": {
+                        # Match qwen3 preprocessor_config defaults.
+                        "mean": [0.5, 0.5, 0.5],
+                        "std": [0.5, 0.5, 0.5]
+                    }
+                }
+            }
+        ]
+    )
     config = {
         "processor": {
             "name": "qwen3_vl_vision_processor",
-            "transforms": [
-                {
-                    "operation": {
-                        "name": "decode_image",
-                        "type": "DecodeImage",
-                        "attrs": {
-                            "color_space": "RGB"
-                        }
-                    }
-                },
-                {
-                    "operation": {
-                        "name": "resize",
-                        "type": "Resize",
-                        "attrs": {
-                            "height": 384,
-                            "width": 384
-                        }
-                    }
-                },
-                {
-                    "operation": {
-                        "name": "rescale",
-                        "type": "Rescale"
-                    }
-                },
-                {
-                    "operation": {
-                        "name": "normalize",
-                        "type": "Normalize",
-                        "attrs": {
-                            # Match qwen3 preprocessor_config defaults.
-                            "mean": [0.5, 0.5, 0.5],
-                            "std": [0.5, 0.5, 0.5]
-                        }
-                    }
-                }
-            ]
+            "transforms": transforms
         }
     }
 
@@ -292,7 +287,7 @@ def main():
         "--precision",
         type=str,
         default="int4",
-        choices=["fp32", "fp16", "int4", "int8"],
+        choices=["fp32", "fp16", "int4"],
         help="Text model precision"
     )
     parser.add_argument(
@@ -335,6 +330,7 @@ def main():
     print(f"Reference: {reference_dir}")
     print(f"Output: {output_dir}")
     print(f"Text precision: {args.precision.upper()}")
+    print("Dynamic image size: True")
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -368,7 +364,7 @@ def main():
     print("  - vision_processor.json     (vision preprocessing)")
     print("  - tokenizer.json            (tokenizer)")
     print("\nNext steps:")
-    print(f"  python ../qwen3vl-oga.py -m {output_dir}")
+    print(f"  python ./qwen3vl-oga.py -m {output_dir}")
     print()
 
 
