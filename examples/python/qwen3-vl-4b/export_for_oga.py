@@ -15,7 +15,8 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoProcessor, Qwen3VLForConditionalGeneration
+from transformers import AutoConfig, AutoProcessor
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from onnxruntime_genai.models.builder import create_model
 
@@ -25,6 +26,11 @@ def prepare_model(input_dir, reference_dir):
     print("\n[1/4] Preparing model...")
     config = AutoConfig.from_pretrained(input_dir, trust_remote_code=True)
     processor = AutoProcessor.from_pretrained(input_dir, trust_remote_code=True)
+
+    Qwen3VLForConditionalGeneration = get_class_from_dynamic_module(
+        "modeling_qwen3_vl.Qwen3VLForConditionalGeneration",
+        reference_dir,
+    )
 
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         input_dir,
@@ -155,6 +161,16 @@ def create_vision_processor_config(output_dir):
                         "type": "DecodeImage",
                         "attrs": {
                             "color_space": "RGB"
+                        }
+                    }
+                },
+                {
+                    "operation": {
+                        "name": "resize",
+                        "type": "Resize",
+                        "attrs": {
+                            "height": 384,
+                            "width": 384
                         }
                     }
                 },
