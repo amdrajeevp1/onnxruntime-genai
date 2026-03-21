@@ -57,6 +57,7 @@ struct CombinedKeyValueCache : KeyValueCache {
   ONNXTensorElementDataType type_;
 
   std::unique_ptr<OrtValue> empty_past_;
+  std::vector<std::unique_ptr<OrtValue>> empty_pasts_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
@@ -104,6 +105,7 @@ struct DefaultKeyValueCache : KeyValueCache {
   std::vector<std::array<int64_t, 4>> layer_shapes_;
 
   std::unique_ptr<OrtValue> empty_past_;
+  std::vector<std::unique_ptr<OrtValue>> empty_pasts_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };

@@ -285,6 +285,7 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
+      std::vector<int> head_size_by_layer{};  // Optional per-layer KV head sizes for mixed-dimension attention models
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt

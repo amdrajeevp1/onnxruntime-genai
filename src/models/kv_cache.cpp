@@ -202,16 +202,66 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     }
   }
 
+  auto get_layer_head_size = [this](int cache_slot_idx) -> int64_t {
+    const auto& per_layer_head_sizes = model_.config_->model.decoder.head_size_by_layer;
+    if (per_layer_head_sizes.empty()) {
+      return model_.config_->model.decoder.head_size;
+    }
+    const int model_layer_idx = kv_layer_indices_.empty() ? cache_slot_idx : kv_layer_indices_[cache_slot_idx];
+    if (model_layer_idx >= 0 && model_layer_idx < static_cast<int>(per_layer_head_sizes.size())) {
+      return static_cast<int64_t>(per_layer_head_sizes[model_layer_idx]);
+    }
+    return model_.config_->model.decoder.head_size;
+  };
+
+  auto get_runtime_input_head_size = [this](const std::string& input_name) -> int64_t {
+    // Prefer the runtime session input shape so KV cache dims exactly match ONNX input contracts.
+    // This is robust for models where cache slot order differs from model layer index.
+    const auto input_shape = model_.session_info_.GetInputShape(input_name);
+    if (input_shape.size() >= 4 && input_shape[3] > 0) {
+      return input_shape[3];
+    }
+    return model_.config_->model.decoder.head_size;
+  };
+
   // Derive the KV data type from the first KV input
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
-  empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
+  const bool has_per_layer_head_sizes = !model_.config_->model.decoder.head_size_by_layer.empty();
+  if (!has_per_layer_head_sizes) {
+    empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
+  }
 
   if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
     // share buffer is a precondition for graph capture
     throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");
   }
 
-  // Set the size after empty_past_ has been created with 0 for this field
+  // Initialize per-layer shapes for mixed head dimensions.
+  if (has_per_layer_head_sizes) {
+    const int max_length = state_.params_->search.max_length;
+    layer_shapes_.resize(layer_count_);
+    for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+      layer_shapes_[layer_idx] = shape_;
+      layer_shapes_[layer_idx][2] = max_length;
+      const int key_name_idx = layer_idx * 2;
+      if (key_name_idx >= 0 && key_name_idx < static_cast<int>(input_name_strings_.size())) {
+        layer_shapes_[layer_idx][3] = get_runtime_input_head_size(input_name_strings_[key_name_idx]);
+      } else {
+        layer_shapes_[layer_idx][3] = get_layer_head_size(layer_idx);
+      }
+    }
+    // Layer-specific empty past tensors must keep sequence length 0.
+    empty_pasts_.reserve(layer_count_ * 2);
+    for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+      std::array<int64_t, 4> empty_shape = layer_shapes_[layer_idx];
+      empty_shape[2] = 0;
+      empty_pasts_.push_back(OrtValue::CreateTensor(Allocator(), empty_shape, type_));
+      empty_pasts_.push_back(OrtValue::CreateTensor(Allocator(), empty_shape, type_));
+    }
+    shape_[2] = max_length;
+  }
+
+  // Set the size after empty past tensor(s) have been created with 0 for this field
   if (state_.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx && model_.config_->model.decoder.sliding_window.has_value() &&
       model_.config_->model.decoder.sliding_window->window_size > 0) {
     const int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
@@ -219,13 +269,15 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
     // Check if we need per-layer allocation for models with alternating attention patterns
     if (!model_.config_->model.decoder.sliding_window->layers.empty()) {
-      // Use per-layer allocation based on sliding window layer indices
-      layer_shapes_.resize(layer_count_);
-
-      // Initialize all layers with base shape and max_length
-      for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-        layer_shapes_[layer_idx] = shape_;
-        layer_shapes_[layer_idx][2] = max_length;
+      // Use per-layer allocation based on sliding window layer indices. Reuse
+      // existing per-layer shapes if already initialized for mixed head sizes.
+      if (layer_shapes_.empty()) {
+        layer_shapes_.resize(layer_count_);
+        for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+          layer_shapes_[layer_idx] = shape_;
+          layer_shapes_[layer_idx][2] = max_length;
+          layer_shapes_[layer_idx][3] = get_layer_head_size(layer_idx);
+        }
       }
 
       // Build model-layer-index to cache-slot-index mapping for sparse KV layouts
@@ -250,6 +302,9 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     }
   } else if (past_present_share_buffer_) {
     shape_[2] = state_.params_->search.max_length;
+    for (auto& layer_shape : layer_shapes_) {
+      layer_shape[2] = state_.params_->search.max_length;
+    }
   }
 
   try {
@@ -285,7 +340,11 @@ void DefaultKeyValueCache::Add() {
   output_index_ = state_.outputs_.size();
 
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, Update() takes care of the rest
+    if (!empty_pasts_.empty()) {
+      state_.inputs_.push_back(empty_pasts_[i].get());  // Layer-specific empty past
+    } else {
+      state_.inputs_.push_back(empty_past_.get());  // Set empty past here, Update() takes care of the rest
+    }
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -353,7 +412,11 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
   if (index == 0) {
     for (int i = 0; i < layer_count_ * 2; i++) {
       pasts_[i] = nullptr;
-      state_.inputs_[input_index_ + i] = empty_past_.get();
+      if (!empty_pasts_.empty()) {
+        state_.inputs_[input_index_ + i] = empty_pasts_[i].get();
+      } else {
+        state_.inputs_[input_index_ + i] = empty_past_.get();
+      }
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);

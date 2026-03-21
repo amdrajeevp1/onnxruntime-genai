@@ -632,6 +632,12 @@ struct Decoder_Element : JSON::Element {
     if (name == "pipeline") {
       return pipeline_;
     }
+    if (name == "head_size_by_layer") {
+      if (!head_size_by_layer_) {
+        head_size_by_layer_ = std::make_unique<IntArray_Element>(v_.head_size_by_layer);
+      }
+      return *head_size_by_layer_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -644,6 +650,7 @@ struct Decoder_Element : JSON::Element {
   Pipeline_Element pipeline_{v_.pipeline};
   SlidingWindow_Element sliding_window_{v_.sliding_window};
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
+  std::unique_ptr<IntArray_Element> head_size_by_layer_;
 };
 
 struct VisionInputs_Element : JSON::Element {
